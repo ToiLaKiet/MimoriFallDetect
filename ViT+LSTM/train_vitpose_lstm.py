@@ -240,6 +240,61 @@ def group_key_from_row(row: dict[str, str], label: int) -> str:
     return f"label-{label}"
 
 
+def expand_group_columns(row: dict[str, object], group_cols: Iterable[str]) -> tuple[str, ...]:
+    if isinstance(group_cols, str):
+        group_cols = (group_cols,)
+
+    expanded = []
+    for group_col in group_cols:
+        group_col = str(group_col).strip()
+        if not group_col:
+            continue
+        if get_row_value(row, group_col):
+            expanded.append(group_col)
+            continue
+
+        separators = "," if "," in group_col else None
+        candidates = group_col.split(separators)
+        expanded.extend(candidate.strip() for candidate in candidates if candidate.strip())
+
+    return tuple(dict.fromkeys(expanded))
+
+
+def manifest_group_key(
+    row: dict[str, object],
+    group_cols: Iterable[str],
+    label: int,
+    image_path: Path,
+    row_index: int,
+) -> str:
+    explicit_group_cols = expand_group_columns(row, group_cols)
+    if explicit_group_cols:
+        parts = []
+        missing_cols = []
+        for group_col in explicit_group_cols:
+            value = get_row_value(row, group_col)
+            if value:
+                parts.append((group_col, value))
+            else:
+                missing_cols.append(group_col)
+
+        if missing_cols:
+            raise KeyError(
+                f"Missing group column(s) at manifest row {row_index}: "
+                f"{', '.join(missing_cols)}"
+            )
+        if len(parts) == 1:
+            return parts[0][1]
+        return "|".join(f"{name}={value}" for name, value in parts)
+
+    group_key = first_row_value(row, "", GROUP_COLUMNS)
+    if group_key:
+        return group_key
+    if image_path.parent.name:
+        return image_path.parent.as_posix()
+    return f"label-{label}"
+
+
 def read_labels(labels_csv: Path, label_col: str, label_offset: int) -> dict[str, LabelRow]:
     labels_csv = Path(labels_csv)
     if not labels_csv.is_file():
@@ -376,7 +431,7 @@ def read_manifest(
     frame_col: str,
     label_col: str,
     label_offset: int,
-    group_col: str,
+    group_cols: Iterable[str],
     sort_col: str,
     limit: int,
 ) -> list[ManifestRow]:
@@ -411,9 +466,13 @@ def read_manifest(
             image_dir=image_dir,
             manifest_dir=manifest_path.parent,
         )
-        group_key = first_row_value(row, group_col, GROUP_COLUMNS)
-        if not group_key:
-            group_key = image_path.parent.as_posix() if image_path.parent.name else f"label-{label}"
+        group_key = manifest_group_key(
+            row=row,
+            group_cols=group_cols,
+            label=label,
+            image_path=image_path,
+            row_index=row_index,
+        )
 
         sort_key = normalize_sort_key(
             first_row_value(row, sort_col, SORT_COLUMNS),
@@ -930,8 +989,9 @@ def parse_args() -> argparse.Namespace:
     # nhiều group column để có thể nhóm theo video/clip/sequence/trial, nếu không có sẽ nhóm theo thư mục chứa ảnh hoặc theo label
     parser.add_argument(
         "--group-col",
-        default="",
-        help="Optional manifest group column, e.g. video/clip/sequence/trial.",
+        nargs="*",
+        default=(),
+        help="Optional manifest group column(s), e.g. Subject Activity Trial Camera.",
     )
     parser.add_argument(
         "--sort-col",
@@ -1072,7 +1132,7 @@ def main() -> None:
             frame_col=args.frame_col,
             label_col=args.label_col,
             label_offset=args.label_offset,
-            group_col=args.group_col,
+            group_cols=args.group_col,
             sort_col=args.sort_col,
             limit=args.limit,
         )
