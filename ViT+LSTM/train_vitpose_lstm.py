@@ -149,27 +149,19 @@ def iter_images(image_dir: Path, limit: int = 0) -> list[Path]:
     return paths
 
 
-def timestamp_variants(value: str | Path) -> set[str]:
+def label_lookup_keys(value: str | Path) -> tuple[str, ...]:
     text = str(value).strip()
-    stem = Path(text).stem
-    candidates = {text, stem}
+    if not text:
+        return ()
 
-    if stem.startswith("pose_"):
-        candidates.add(stem[len("pose_") :])
-    if text.startswith("pose_"):
-        candidates.add(text[len("pose_") :])
+    path = Path(text)
+    candidates = [text]
+    if path.name and path.name != text:
+        candidates.append(path.name)
+    if path.suffix.lower() in IMAGE_EXTENSIONS and path.stem:
+        candidates.append(path.stem)
 
-    expanded = set(candidates)
-    for candidate in list(candidates):
-        expanded.add(candidate.replace(":", "_"))
-        expanded.add(candidate.replace("_", ":", 2))
-        if candidate.startswith("pose_"):
-            stripped = candidate[len("pose_") :]
-            expanded.add(stripped)
-            expanded.add(stripped.replace(":", "_"))
-            expanded.add(stripped.replace("_", ":", 2))
-
-    return {item for item in expanded if item}
+    return tuple(dict.fromkeys(candidates))
 
 
 def get_row_value(row: dict[str, object], name: str, default: str = "") -> str:
@@ -276,13 +268,13 @@ def read_labels(labels_csv: Path, label_col: str, label_offset: int) -> dict[str
             )
 
             key_sources = [timestamp]
-            for optional_col in ("Image", "image", "Filename", "filename", "File", "Path"):
+            for optional_col in FRAME_COLUMNS:
                 value = get_row_value(row, optional_col)
                 if value:
                     key_sources.append(value)
 
             for key_source in key_sources:
-                for key in timestamp_variants(key_source):
+                for key in label_lookup_keys(key_source):
                     if key in label_map:
                         duplicate_keys += 1
                     label_map[key] = label_row
@@ -325,6 +317,7 @@ def rows_from_json_manifest(data: object) -> list[dict[str, object]]:
 
 
 def load_manifest_rows(manifest_path: Path) -> list[dict[str, object]]:
+    #suffix là phần mở rộng của file, ví dụ .json, .csv, .jsonl
     suffix = manifest_path.suffix.lower()
     if suffix in {".jsonl", ".ndjson"}:
         rows = []
@@ -387,6 +380,7 @@ def read_manifest(
     sort_col: str,
     limit: int,
 ) -> list[ManifestRow]:
+    # resolve là để tìm file ảnh dựa trên giá trị frame trong manifest, có thể là đường dẫn tuyệt đối hoặc tương đối với image_dir hoặc manifest_dir
     manifest_path = Path(manifest_path).resolve()
     if not manifest_path.is_file():
         raise FileNotFoundError(f"Manifest not found: {manifest_path}")
@@ -445,7 +439,7 @@ def find_label_for_image(image_path: Path, label_map: dict[str, LabelRow]) -> La
         str(image_path),
     ]
     for key_source in key_sources:
-        for key in timestamp_variants(key_source):
+        for key in label_lookup_keys(key_source):
             if key in label_map:
                 return label_map[key]
     return None
@@ -516,12 +510,14 @@ def draw_skeleton(
 
             x1, y1 = keypoints[a]
             x2, y2 = keypoints[b]
+            # line là hàm vẽ đường thẳng giữa hai keypoint a và b với màu sắc (40, 220, 140) và độ dày line_width
             draw.line((x1, y1, x2, y2), fill=(40, 220, 140), width=line_width)
 
         for index, (x, y) in enumerate(keypoints):
             if index >= len(scores) or scores[index] < keypoint_threshold:
                 continue
             color = keypoint_color(index)
+            # ellipse là hình elip, vẽ hình tròn tại vị trí keypoint với bán kính radius và màu sắc color, đồng thời có viền màu trắng
             draw.ellipse(
                 (x - radius, y - radius, x + radius, y + radius),
                 fill=color,
@@ -931,6 +927,7 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Manifest frame/path column. Empty value auto-detects common names.",
     )
+    # nhiều group column để có thể nhóm theo video/clip/sequence/trial, nếu không có sẽ nhóm theo thư mục chứa ảnh hoặc theo label
     parser.add_argument(
         "--group-col",
         default="",
@@ -983,8 +980,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument(
         "--sequence-label",
+        # majority là lấy nhãn xuất hiện nhiều nhất trong cửa sổ, last là lấy nhãn cuối cùng trong cửa sổ
         choices=("majority", "last"),
-        default="majority",
+        default="last",
         help="How to choose a label for each sequence window.",
     )
     parser.add_argument("--image-size", type=int, default=224)
@@ -1007,6 +1005,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bidirectional", action="store_true")
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--val-split", type=float, default=0.2)
+    #group_split nhận giá trị True để chia tập train/val theo nhóm trial/source thay vì chia ngẫu nhiên theo chuỗi
     parser.add_argument(
         "--group-split",
         action="store_true",
