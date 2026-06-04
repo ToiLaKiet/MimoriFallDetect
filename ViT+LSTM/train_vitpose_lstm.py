@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import random
@@ -32,6 +33,10 @@ from utils import train_model  # noqa: E402
 DEFAULT_DETECTOR_MODEL = "PekingU/rtdetr_r50vd_coco_o365"
 DEFAULT_POSE_MODEL = "usyd-community/vitpose-base-simple"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+FRAME_COLUMNS = ("frame", "image", "image_path", "path", "filename", "file")
+LABEL_COLUMNS = ("label", "Label", "target", "class", "class_id", "activity")
+GROUP_COLUMNS = ("group", "video", "clip", "sequence", "trial", "source_file")
+SORT_COLUMNS = ("frame_index", "index", "idx", "timestamp", "time", "sort_key")
 
 COCO_EDGES = [
     (5, 7),
@@ -68,6 +73,14 @@ class LabelRow:
 class FrameItem:
     image_path: Path
     skeleton_path: Path
+    label: int
+    group_key: str
+    sort_key: str
+
+
+@dataclass(frozen=True)
+class ManifestRow:
+    image_path: Path
     label: int
     group_key: str
     sort_key: str
@@ -159,18 +172,64 @@ def timestamp_variants(value: str | Path) -> set[str]:
     return {item for item in expanded if item}
 
 
-def get_row_value(row: dict[str, str], name: str, default: str = "") -> str:
+def get_row_value(row: dict[str, object], name: str, default: str = "") -> str:
     if name in row:
-        return row[name]
+        value = row[name]
+        return default if value is None else str(value).strip()
     lowered = name.lower()
     for key, value in row.items():
         if key.lower() == lowered:
-            return value
+            return default if value is None else str(value).strip()
     return default
+
+
+def first_row_value(
+    row: dict[str, object],
+    preferred: str,
+    candidates: Iterable[str],
+) -> str:
+    if preferred:
+        value = get_row_value(row, preferred)
+        if value:
+            return value
+
+    for candidate in candidates:
+        value = get_row_value(row, candidate)
+        if value:
+            return value
+    return ""
+
+
+def required_row_value(
+    row: dict[str, object],
+    preferred: str,
+    candidates: Iterable[str],
+    row_index: int,
+    kind: str,
+) -> str:
+    value = first_row_value(row, preferred, candidates)
+    if value:
+        return value
+
+    names = [preferred] if preferred else []
+    names.extend(candidate for candidate in candidates if candidate not in names)
+    raise KeyError(
+        f"Missing {kind} column at manifest row {row_index}. "
+        f"Tried: {', '.join(names)}"
+    )
 
 
 def parse_label(value: str, offset: int) -> int:
     return int(float(value)) + offset
+
+
+def normalize_sort_key(value: str, row_index: int) -> str:
+    if not value:
+        return f"{row_index:012d}"
+    try:
+        return f"{int(float(value)):012d}"
+    except ValueError:
+        return value
 
 
 def group_key_from_row(row: dict[str, str], label: int) -> str:
@@ -233,6 +292,152 @@ def read_labels(labels_csv: Path, label_col: str, label_offset: int) -> dict[str
     return label_map
 
 
+def rows_from_json_manifest(data: object) -> list[dict[str, object]]:
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        rows = None
+        for key in ("frames", "items", "annotations", "data", "manifest"):
+            value = data.get(key)
+            if isinstance(value, list):
+                rows = value
+                break
+
+        if rows is None:
+            rows = []
+            for frame_name, value in data.items():
+                if isinstance(value, dict):
+                    item = dict(value)
+                    if not any(get_row_value(item, col) for col in FRAME_COLUMNS):
+                        item["frame"] = frame_name
+                else:
+                    item = {"frame": frame_name, "label": value}
+                rows.append(item)
+    else:
+        raise ValueError("JSON manifest must be a list or object.")
+
+    converted = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"Manifest row {index} must be an object/dict.")
+        converted.append(dict(row))
+    return converted
+
+
+def load_manifest_rows(manifest_path: Path) -> list[dict[str, object]]:
+    suffix = manifest_path.suffix.lower()
+    if suffix in {".jsonl", ".ndjson"}:
+        rows = []
+        with manifest_path.open("r", encoding="utf-8", errors="replace") as f:
+            for line_number, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    raise ValueError(f"JSONL line {line_number} must be an object.")
+                rows.append(row)
+        return rows
+
+    if suffix == ".json":
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return rows_from_json_manifest(data)
+
+    with manifest_path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            raise ValueError(f"Manifest CSV has no header: {manifest_path}")
+        return [dict(row) for row in reader]
+
+
+def resolve_manifest_image_path(
+    frame_value: str,
+    image_dir: Path | None,
+    manifest_dir: Path,
+) -> Path:
+    frame_path = Path(frame_value).expanduser()
+    if frame_path.is_absolute():
+        return frame_path.resolve()
+
+    roots = []
+    if image_dir is not None:
+        roots.append(image_dir)
+    roots.append(manifest_dir)
+
+    seen = set()
+    for root in roots:
+        root = root.resolve()
+        if root in seen:
+            continue
+        seen.add(root)
+        candidate = (root / frame_path).resolve()
+        if candidate.exists():
+            return candidate
+
+    return ((image_dir or manifest_dir) / frame_path).resolve()
+
+
+def read_manifest(
+    manifest_path: Path,
+    image_dir: Path | None,
+    frame_col: str,
+    label_col: str,
+    label_offset: int,
+    group_col: str,
+    sort_col: str,
+    limit: int,
+) -> list[ManifestRow]:
+    manifest_path = Path(manifest_path).resolve()
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+
+    raw_rows = load_manifest_rows(manifest_path)
+    if limit > 0:
+        raw_rows = raw_rows[:limit]
+
+    rows = []
+    for row_index, row in enumerate(raw_rows):
+        frame_value = required_row_value(
+            row=row,
+            preferred=frame_col,
+            candidates=FRAME_COLUMNS,
+            row_index=row_index,
+            kind="frame",
+        )
+        label_value = required_row_value(
+            row=row,
+            preferred=label_col,
+            candidates=LABEL_COLUMNS,
+            row_index=row_index,
+            kind="label",
+        )
+        label = parse_label(label_value, label_offset)
+        image_path = resolve_manifest_image_path(
+            frame_value=frame_value,
+            image_dir=image_dir,
+            manifest_dir=manifest_path.parent,
+        )
+        group_key = first_row_value(row, group_col, GROUP_COLUMNS)
+        if not group_key:
+            group_key = image_path.parent.as_posix() if image_path.parent.name else f"label-{label}"
+
+        sort_key = normalize_sort_key(
+            first_row_value(row, sort_col, SORT_COLUMNS),
+            row_index,
+        )
+
+        rows.append(
+            ManifestRow(
+                image_path=image_path,
+                label=label,
+                group_key=group_key,
+                sort_key=sort_key,
+            )
+        )
+
+    return rows
+
+
 def find_label_for_image(image_path: Path, label_map: dict[str, LabelRow]) -> LabelRow | None:
     key_sources = [
         image_path.name,
@@ -247,7 +452,13 @@ def find_label_for_image(image_path: Path, label_map: dict[str, LabelRow]) -> La
 
 
 def skeleton_cache_path(image_path: Path, image_root: Path, cache_root: Path) -> Path:
-    rel_path = image_path.relative_to(image_root)
+    resolved_image = image_path.resolve()
+    resolved_root = image_root.resolve()
+    try:
+        rel_path = resolved_image.relative_to(resolved_root)
+    except ValueError:
+        digest = hashlib.sha1(str(resolved_image).encode("utf-8")).hexdigest()[:12]
+        rel_path = Path("_external") / f"{image_path.stem}_{digest}{image_path.suffix}"
     return cache_root / rel_path.with_suffix(".png")
 
 
@@ -528,6 +739,38 @@ def make_frame_items(
     return items, missing_labels
 
 
+def make_frame_items_from_manifest(
+    manifest_rows: list[ManifestRow],
+    image_root: Path,
+    pose_cache_dir: Path,
+    use_input_images_as_skeletons: bool,
+) -> tuple[list[FrameItem], list[Path]]:
+    items: list[FrameItem] = []
+    missing_images: list[Path] = []
+
+    for row in manifest_rows:
+        if not row.image_path.is_file():
+            missing_images.append(row.image_path)
+            continue
+
+        skeleton_path = (
+            row.image_path
+            if use_input_images_as_skeletons
+            else skeleton_cache_path(row.image_path, image_root, pose_cache_dir)
+        )
+        items.append(
+            FrameItem(
+                image_path=row.image_path,
+                skeleton_path=skeleton_path,
+                label=row.label,
+                group_key=row.group_key,
+                sort_key=row.sort_key,
+            )
+        )
+
+    return items, missing_images
+
+
 def filter_existing_skeletons(frame_items: list[FrameItem]) -> list[FrameItem]:
     existing = [item for item in frame_items if item.skeleton_path.is_file()]
     missing_count = len(frame_items) - len(existing)
@@ -659,14 +902,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--image-dir",
         type=Path,
-        required=True,
-        help="Directory containing raw image frames. File names should match labels CSV timestamps.",
+        default=None,
+        help=(
+            "Directory containing raw image frames. Required without --manifest-path. "
+            "With a manifest, relative frame paths are resolved from this directory first."
+        ),
+    )
+    parser.add_argument(
+        "--manifest-path",
+        type=Path,
+        default=None,
+        help=(
+            "CSV/JSON/JSONL manifest where each row maps one frame to one label. "
+            "Common frame columns are auto-detected: frame, image_path, path, filename."
+        ),
     )
     parser.add_argument(
         "--labels-csv",
         type=Path,
         default=SCRIPT_DIR / "labels.csv",
-        help="CSV with Timestamp and Label columns. Default: ViT+LSTM/labels.csv.",
+        help=(
+            "Timestamp-wise label CSV used when --manifest-path is not provided. "
+            "Default: ViT+LSTM/labels.csv."
+        ),
+    )
+    parser.add_argument(
+        "--frame-col",
+        default="",
+        help="Manifest frame/path column. Empty value auto-detects common names.",
+    )
+    parser.add_argument(
+        "--group-col",
+        default="",
+        help="Optional manifest group column, e.g. video/clip/sequence/trial.",
+    )
+    parser.add_argument(
+        "--sort-col",
+        default="",
+        help="Optional manifest sort column, e.g. frame_index/timestamp.",
     )
     parser.add_argument(
         "--pose-cache-dir",
@@ -771,6 +1044,12 @@ def main() -> None:
     args = parse_args()
     seed_everything(args.seed)
 
+    if args.manifest_path is not None:
+        args.manifest_path = args.manifest_path.resolve()
+    if args.image_dir is None:
+        if args.manifest_path is None:
+            raise RuntimeError("--image-dir is required when --manifest-path is not provided.")
+        args.image_dir = args.manifest_path.parent
     args.image_dir = args.image_dir.resolve()
     args.labels_csv = args.labels_csv.resolve()
     if args.pose_cache_dir is None:
@@ -783,32 +1062,60 @@ def main() -> None:
     args.max_persons = max(1, args.max_persons)
     args.log_every = max(1, args.log_every)
 
-    image_paths = iter_images(args.image_dir, args.limit)
-    if not image_paths:
-        raise RuntimeError(f"No images found in {args.image_dir}")
-
-    label_map = read_labels(args.labels_csv, args.label_col, args.label_offset)
     use_input_images_as_skeletons = args.no_extract and (
         args.pose_cache_dir == args.image_dir
     )
-    frame_items, missing_labels = make_frame_items(
-        image_paths=image_paths,
-        image_root=args.image_dir,
-        pose_cache_dir=args.pose_cache_dir,
-        label_map=label_map,
-        use_input_images_as_skeletons=use_input_images_as_skeletons,
-    )
 
-    print(
-        f"Found {len(image_paths)} images, matched {len(frame_items)} labels, "
-        f"missing labels for {len(missing_labels)} images."
-    )
-    if missing_labels:
-        preview = ", ".join(path.name for path in missing_labels[:5])
-        print(f"First missing-label images: {preview}")
+    if args.manifest_path is not None:
+        manifest_rows = read_manifest(
+            manifest_path=args.manifest_path,
+            image_dir=args.image_dir,
+            frame_col=args.frame_col,
+            label_col=args.label_col,
+            label_offset=args.label_offset,
+            group_col=args.group_col,
+            sort_col=args.sort_col,
+            limit=args.limit,
+        )
+        frame_items, missing_images = make_frame_items_from_manifest(
+            manifest_rows=manifest_rows,
+            image_root=args.image_dir,
+            pose_cache_dir=args.pose_cache_dir,
+            use_input_images_as_skeletons=use_input_images_as_skeletons,
+        )
+        print(
+            f"Read {len(manifest_rows)} manifest rows, matched {len(frame_items)} images, "
+            f"missing files for {len(missing_images)} rows."
+        )
+        if missing_images:
+            preview = ", ".join(str(path) for path in missing_images[:5])
+            print(f"First missing image files: {preview}")
+    else:
+        image_paths = iter_images(args.image_dir, args.limit)
+        if not image_paths:
+            raise RuntimeError(f"No images found in {args.image_dir}")
+
+        label_map = read_labels(args.labels_csv, args.label_col, args.label_offset)
+        frame_items, missing_labels = make_frame_items(
+            image_paths=image_paths,
+            image_root=args.image_dir,
+            pose_cache_dir=args.pose_cache_dir,
+            label_map=label_map,
+            use_input_images_as_skeletons=use_input_images_as_skeletons,
+        )
+
+        print(
+            f"Found {len(image_paths)} images, matched {len(frame_items)} labels, "
+            f"missing labels for {len(missing_labels)} images."
+        )
+        if missing_labels:
+            preview = ", ".join(path.name for path in missing_labels[:5])
+            print(f"First missing-label images: {preview}")
 
     if not frame_items:
-        raise RuntimeError("No image frames matched labels; check image file names and labels CSV.")
+        raise RuntimeError(
+            "No image frames are trainable; check manifest/labels and image paths."
+        )
 
     device = choose_device(args.device)
     print(f"Using device: {device}")
