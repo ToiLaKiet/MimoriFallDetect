@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the CNN+LSTM classifier from raw images via ViTPose skeletons."""
+"""Train the CNN+LSTM classifier from precomputed skeleton images."""
 
 from __future__ import annotations
 
@@ -7,10 +7,8 @@ import argparse
 import csv
 import hashlib
 import json
-import os
 import random
 import sys
-import tempfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +16,7 @@ from typing import Iterable
 
 import numpy as np
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -30,36 +28,11 @@ from model import SkeletonImageLSTMClassifier  # noqa: E402
 from utils import train_model  # noqa: E402
 
 
-DEFAULT_DETECTOR_MODEL = "PekingU/rtdetr_r50vd_coco_o365"
-DEFAULT_POSE_MODEL = "usyd-community/vitpose-base-simple"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 FRAME_COLUMNS = ("frame", "image", "image_path", "path", "filename", "file")
 LABEL_COLUMNS = ("label", "Label", "target", "class", "class_id", "activity")
 GROUP_COLUMNS = ("group", "video", "clip", "sequence", "trial", "source_file")
 SORT_COLUMNS = ("frame_index", "index", "idx", "timestamp", "time", "sort_key")
-
-COCO_EDGES = [
-    (5, 7),
-    (7, 9),
-    (6, 8),
-    (8, 10),
-    (5, 6),
-    (5, 11),
-    (6, 12),
-    (11, 12),
-    (11, 13),
-    (13, 15),
-    (12, 14),
-    (14, 16),
-    (0, 1),
-    (0, 2),
-    (1, 3),
-    (2, 4),
-    (3, 5),
-    (4, 6),
-]
-LEFT_KEYPOINTS = {1, 3, 5, 7, 9, 11, 13, 15}
-RIGHT_KEYPOINTS = {2, 4, 6, 8, 10, 12, 14, 16}
 
 
 @dataclass(frozen=True)
@@ -126,15 +99,6 @@ def choose_device(requested: str) -> torch.device:
         requested = "cpu"
 
     return torch.device(requested)
-
-
-def configure_runtime_cache() -> None:
-    cache_root = Path(tempfile.gettempdir()) / "vitpose-train-cache"
-    for child in ("matplotlib", "xdg"):
-        (cache_root / child).mkdir(parents=True, exist_ok=True)
-
-    os.environ.setdefault("MPLCONFIGDIR", str(cache_root / "matplotlib"))
-    os.environ.setdefault("XDG_CACHE_HOME", str(cache_root / "xdg"))
 
 
 def iter_images(image_dir: Path, limit: int = 0) -> list[Path]:
@@ -508,232 +472,12 @@ def skeleton_cache_path(image_path: Path, image_root: Path, cache_root: Path) ->
     resolved_image = image_path.resolve()
     resolved_root = image_root.resolve()
     try:
+        # relative_to trả về đường dẫn tương đối từ resolved_root đến resolved_image nếu resolved_image nằm trong resolved_root, ngược lại sẽ ném ValueError
         rel_path = resolved_image.relative_to(resolved_root)
     except ValueError:
         digest = hashlib.sha1(str(resolved_image).encode("utf-8")).hexdigest()[:12]
         rel_path = Path("_external") / f"{image_path.stem}_{digest}{image_path.suffix}"
     return cache_root / rel_path.with_suffix(".png")
-
-
-def xyxy_to_xywh(boxes_xyxy: np.ndarray) -> np.ndarray:
-    boxes_xywh = boxes_xyxy.astype(np.float32, copy=True)
-    boxes_xywh[:, 2] = boxes_xywh[:, 2] - boxes_xywh[:, 0]
-    boxes_xywh[:, 3] = boxes_xywh[:, 3] - boxes_xywh[:, 1]
-    return boxes_xywh
-
-
-def resize_for_inference(image: Image.Image, max_side: int) -> Image.Image:
-    if max_side <= 0:
-        return image
-
-    width, height = image.size
-    longest = max(width, height)
-    if longest <= max_side:
-        return image
-
-    scale = max_side / float(longest)
-    resized_size = (max(1, int(width * scale)), max(1, int(height * scale)))
-    return image.resize(resized_size, pil_bilinear_resample())
-
-
-def keypoint_color(index: int) -> tuple[int, int, int]:
-    if index in LEFT_KEYPOINTS:
-        return (25, 160, 255)
-    if index in RIGHT_KEYPOINTS:
-        return (255, 80, 80)
-    return (60, 220, 255)
-
-
-def draw_skeleton(
-    image_size: tuple[int, int],
-    persons: list[dict[str, np.ndarray]],
-    keypoint_threshold: float,
-) -> Image.Image:
-    canvas = Image.new("RGB", image_size, (0, 0, 0))
-    draw = ImageDraw.Draw(canvas)
-    width, height = image_size
-    line_width = max(2, int(round(max(width, height) / 220)))
-    radius = max(3, int(round(max(width, height) / 180)))
-
-    for person in persons:
-        keypoints = np.asarray(person["keypoints"], dtype=np.float32)
-        scores = np.asarray(person["scores"], dtype=np.float32)
-        if keypoints.size == 0:
-            continue
-
-        for a, b in COCO_EDGES:
-            if a >= len(keypoints) or b >= len(keypoints):
-                continue
-            if scores[a] < keypoint_threshold or scores[b] < keypoint_threshold:
-                continue
-
-            x1, y1 = keypoints[a]
-            x2, y2 = keypoints[b]
-            # line là hàm vẽ đường thẳng giữa hai keypoint a và b với màu sắc (40, 220, 140) và độ dày line_width
-            draw.line((x1, y1, x2, y2), fill=(40, 220, 140), width=line_width)
-
-        for index, (x, y) in enumerate(keypoints):
-            if index >= len(scores) or scores[index] < keypoint_threshold:
-                continue
-            color = keypoint_color(index)
-            # ellipse là hình elip, vẽ hình tròn tại vị trí keypoint với bán kính radius và màu sắc color, đồng thời có viền màu trắng
-            draw.ellipse(
-                (x - radius, y - radius, x + radius, y + radius),
-                fill=color,
-                outline=(255, 255, 255),
-            )
-
-    return canvas
-
-
-class VitPoseSkeletonExtractor:
-    def __init__(
-        self,
-        detector_model_name: str,
-        pose_model_name: str,
-        device: torch.device,
-        detection_threshold: float,
-        keypoint_threshold: float,
-        max_persons: int,
-        max_side: int,
-        save_blank_on_miss: bool,
-    ) -> None:
-        configure_runtime_cache()
-
-        from transformers import (  # noqa: PLC0415
-            AutoProcessor,
-            RTDetrForObjectDetection,
-            VitPoseForPoseEstimation,
-        )
-
-        self.device = device
-        self.detection_threshold = detection_threshold
-        self.keypoint_threshold = keypoint_threshold
-        self.max_persons = max_persons
-        self.max_side = max_side
-        self.save_blank_on_miss = save_blank_on_miss
-
-        print(f"Loading detector: {detector_model_name}")
-        self.det_processor = AutoProcessor.from_pretrained(detector_model_name)
-        self.det_model = (
-            RTDetrForObjectDetection.from_pretrained(detector_model_name)
-            .to(device)
-            .eval()
-        )
-
-        print(f"Loading pose model: {pose_model_name}")
-        self.pose_processor = AutoProcessor.from_pretrained(pose_model_name)
-        self.pose_model = (
-            VitPoseForPoseEstimation.from_pretrained(pose_model_name).to(device).eval()
-        )
-
-    @torch.no_grad()
-    def detect_people(self, image: Image.Image) -> tuple[np.ndarray, np.ndarray]:
-        inputs = self.det_processor(images=image, return_tensors="pt").to(self.device)
-        outputs = self.det_model(**inputs)
-        results = self.det_processor.post_process_object_detection(
-            outputs,
-            target_sizes=torch.tensor([(image.height, image.width)], device=self.device),
-            threshold=self.detection_threshold,
-        )[0]
-
-        labels = results["labels"].detach().cpu().numpy()
-        person_indices = np.flatnonzero(labels == 0)
-        if len(person_indices) == 0:
-            return np.empty((0, 4), dtype=np.float32), np.empty((0,), dtype=np.float32)
-
-        boxes = results["boxes"][person_indices].detach().cpu().numpy()
-        scores = results["scores"][person_indices].detach().cpu().numpy()
-        order = np.argsort(scores)[::-1][: self.max_persons]
-
-        return xyxy_to_xywh(boxes[order]), scores[order].astype(np.float32)
-
-    @torch.no_grad()
-    def estimate_pose(
-        self,
-        image: Image.Image,
-        boxes_xywh: np.ndarray,
-    ) -> list[dict[str, np.ndarray]]:
-        if len(boxes_xywh) == 0:
-            return []
-
-        pose_inputs = self.pose_processor(
-            image,
-            boxes=[boxes_xywh],
-            return_tensors="pt",
-        ).to(self.device)
-        pose_outputs = self.pose_model(**pose_inputs)
-        pose_results = self.pose_processor.post_process_pose_estimation(
-            pose_outputs,
-            boxes=[boxes_xywh],
-        )[0]
-
-        persons = []
-        for person_id, pose in enumerate(pose_results):
-            persons.append(
-                {
-                    "person_id": person_id,
-                    "bbox_xywh": boxes_xywh[person_id].astype(np.float32),
-                    "keypoints": pose["keypoints"].detach().cpu().numpy().astype(np.float32),
-                    "scores": pose["scores"].detach().cpu().numpy().astype(np.float32),
-                }
-            )
-        return persons
-
-    def extract_one(self, image_path: Path, output_path: Path) -> bool:
-        with Image.open(image_path) as image_file:
-            image = image_file.convert("RGB")
-
-        image = resize_for_inference(image, self.max_side)
-        boxes_xywh, _ = self.detect_people(image)
-        persons = self.estimate_pose(image, boxes_xywh)
-
-        if not persons and not self.save_blank_on_miss:
-            return False
-
-        skeleton = draw_skeleton(image.size, persons, self.keypoint_threshold)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        skeleton.save(output_path)
-        return bool(persons)
-
-
-def precompute_skeletons(
-    frame_items: list[FrameItem],
-    args: argparse.Namespace,
-    device: torch.device,
-) -> None:
-    extractor = VitPoseSkeletonExtractor(
-        detector_model_name=args.detector_model,
-        pose_model_name=args.pose_model,
-        device=device,
-        detection_threshold=args.det_thr,
-        keypoint_threshold=args.kpt_thr,
-        max_persons=args.max_persons,
-        max_side=args.max_side,
-        save_blank_on_miss=args.save_blank_on_miss,
-    )
-
-    total = len(frame_items)
-    extracted = 0
-    skipped_existing = 0
-    missed = 0
-
-    for index, item in enumerate(frame_items, start=1):
-        if item.skeleton_path.exists() and not args.overwrite_cache:
-            skipped_existing += 1
-        else:
-            found_person = extractor.extract_one(item.image_path, item.skeleton_path)
-            if found_person:
-                extracted += 1
-            else:
-                missed += 1
-
-        if index == total or index % args.log_every == 0:
-            print(
-                "ViTPose cache "
-                f"{index}/{total} | new={extracted} "
-                f"existing={skipped_existing} missed={missed}"
-            )
 
 
 class SkeletonSequenceDataset(Dataset):
@@ -763,24 +507,24 @@ class SkeletonSequenceDataset(Dataset):
 def make_frame_items(
     image_paths: list[Path],
     image_root: Path,
-    pose_cache_dir: Path,
+    skeleton_dir: Path,
     label_map: dict[str, LabelRow],
-    use_input_images_as_skeletons: bool,
-) -> tuple[list[FrameItem], list[Path]]:
+) -> tuple[list[FrameItem], list[Path], list[Path]]:
     items: list[FrameItem] = []
     missing_labels: list[Path] = []
+    missing_skeletons: list[Path] = []
 
     for image_path in image_paths:
         label_row = find_label_for_image(image_path, label_map)
         if label_row is None:
             missing_labels.append(image_path)
             continue
+        
+        skeleton_path = skeleton_cache_path(image_path, image_root, skeleton_dir)
+        if not skeleton_path.is_file():
+            missing_skeletons.append(skeleton_path)
+            continue
 
-        skeleton_path = (
-            image_path
-            if use_input_images_as_skeletons
-            else skeleton_cache_path(image_path, image_root, pose_cache_dir)
-        )
         items.append(
             FrameItem(
                 image_path=image_path,
@@ -791,28 +535,23 @@ def make_frame_items(
             )
         )
 
-    return items, missing_labels
+    return items, missing_labels, missing_skeletons
 
 
 def make_frame_items_from_manifest(
     manifest_rows: list[ManifestRow],
     image_root: Path,
-    pose_cache_dir: Path,
-    use_input_images_as_skeletons: bool,
+    skeleton_dir: Path,
 ) -> tuple[list[FrameItem], list[Path]]:
     items: list[FrameItem] = []
-    missing_images: list[Path] = []
+    missing_skeletons: list[Path] = []
 
     for row in manifest_rows:
-        if not row.image_path.is_file():
-            missing_images.append(row.image_path)
+        skeleton_path = skeleton_cache_path(row.image_path, image_root, skeleton_dir)
+        if not skeleton_path.is_file():
+            missing_skeletons.append(skeleton_path)
             continue
 
-        skeleton_path = (
-            row.image_path
-            if use_input_images_as_skeletons
-            else skeleton_cache_path(row.image_path, image_root, pose_cache_dir)
-        )
         items.append(
             FrameItem(
                 image_path=row.image_path,
@@ -823,15 +562,7 @@ def make_frame_items_from_manifest(
             )
         )
 
-    return items, missing_images
-
-
-def filter_existing_skeletons(frame_items: list[FrameItem]) -> list[FrameItem]:
-    existing = [item for item in frame_items if item.skeleton_path.is_file()]
-    missing_count = len(frame_items) - len(existing)
-    if missing_count:
-        print(f"Skipped {missing_count} frames without skeleton cache.")
-    return existing
+    return items, missing_skeletons
 
 
 def sequence_label(labels: Iterable[int], mode: str) -> int:
@@ -949,18 +680,15 @@ def save_metadata(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Train SkeletonImageLSTMClassifier from raw image frames. "
-            "Raw images are first converted to skeleton images with RT-DETR + ViTPose."
-        )
+        description="Train SkeletonImageLSTMClassifier from precomputed skeleton images."
     )
     parser.add_argument(
         "--image-dir",
         type=Path,
         default=None,
         help=(
-            "Directory containing raw image frames. Required without --manifest-path. "
-            "With a manifest, relative frame paths are resolved from this directory first."
+            "Original frame root used to map frames to skeleton paths. "
+            "Required without --manifest-path."
         ),
     )
     parser.add_argument(
@@ -986,7 +714,6 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Manifest frame/path column. Empty value auto-detects common names.",
     )
-    # nhiều group column để có thể nhóm theo video/clip/sequence/trial, nếu không có sẽ nhóm theo thư mục chứa ảnh hoặc theo label
     parser.add_argument(
         "--group-col",
         nargs="*",
@@ -999,42 +726,19 @@ def parse_args() -> argparse.Namespace:
         help="Optional manifest sort column, e.g. frame_index/timestamp.",
     )
     parser.add_argument(
+        "--skeleton-dir",
         "--pose-cache-dir",
+        dest="skeleton_dir",
         type=Path,
-        default=None,
-        help="Directory for cached ViTPose skeleton images. Default: ViT+LSTM/vitpose_cache.",
+        default=SCRIPT_DIR / "vitpose_cache",
+        help="Directory containing precomputed skeleton PNG files. Default: ViT+LSTM/vitpose_cache.",
     )
-    parser.add_argument(
-        "--no-extract",
-        action="store_true",
-        help="Skip ViTPose extraction and train from existing skeletons in pose-cache-dir.",
-    )
-    parser.add_argument(
-        "--overwrite-cache",
-        action="store_true",
-        help="Regenerate skeleton cache even when output files already exist.",
-    )
-    parser.add_argument(
-        "--save-blank-on-miss",
-        action="store_true",
-        help="Save a blank skeleton frame when no person is detected.",
-    )
-    parser.add_argument("--detector-model", default=DEFAULT_DETECTOR_MODEL)
-    parser.add_argument("--pose-model", default=DEFAULT_POSE_MODEL)
+    parser.add_argument("--no-extract", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--device",
         default="auto",
         choices=("auto", "cpu", "cuda", "mps"),
-        help="Training/inference device. Default: auto.",
-    )
-    parser.add_argument("--det-thr", type=float, default=0.3)
-    parser.add_argument("--kpt-thr", type=float, default=0.3)
-    parser.add_argument("--max-persons", type=int, default=1)
-    parser.add_argument(
-        "--max-side",
-        type=int,
-        default=640,
-        help="Resize long side before ViTPose extraction; 0 keeps original size.",
+        help="Training device. Default: auto.",
     )
     parser.add_argument("--sequence-length", type=int, default=10)
     parser.add_argument("--stride", type=int, default=1)
@@ -1073,7 +777,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--log-every", type=int, default=25)
     parser.add_argument(
         "--checkpoint-path",
         type=Path,
@@ -1111,19 +814,9 @@ def main() -> None:
         args.image_dir = args.manifest_path.parent
     args.image_dir = args.image_dir.resolve()
     args.labels_csv = args.labels_csv.resolve()
-    if args.pose_cache_dir is None:
-        args.pose_cache_dir = (
-            args.image_dir if args.no_extract else SCRIPT_DIR / "vitpose_cache"
-        )
-    args.pose_cache_dir = args.pose_cache_dir.resolve()
+    args.skeleton_dir = args.skeleton_dir.resolve()
     args.sequence_length = max(1, args.sequence_length)
     args.stride = max(1, args.stride)
-    args.max_persons = max(1, args.max_persons)
-    args.log_every = max(1, args.log_every)
-
-    use_input_images_as_skeletons = args.no_extract and (
-        args.pose_cache_dir == args.image_dir
-    )
 
     if args.manifest_path is not None:
         manifest_rows = read_manifest(
@@ -1139,54 +832,48 @@ def main() -> None:
         frame_items, missing_images = make_frame_items_from_manifest(
             manifest_rows=manifest_rows,
             image_root=args.image_dir,
-            pose_cache_dir=args.pose_cache_dir,
-            use_input_images_as_skeletons=use_input_images_as_skeletons,
+            skeleton_dir=args.skeleton_dir,
         )
         print(
-            f"Read {len(manifest_rows)} manifest rows, matched {len(frame_items)} images, "
-            f"missing files for {len(missing_images)} rows."
+            f"Read {len(manifest_rows)} manifest rows, matched {len(frame_items)} skeletons, "
+            f"missing skeleton files for {len(missing_images)} rows."
         )
         if missing_images:
             preview = ", ".join(str(path) for path in missing_images[:5])
-            print(f"First missing image files: {preview}")
+            print(f"First missing skeleton files: {preview}")
     else:
         image_paths = iter_images(args.image_dir, args.limit)
         if not image_paths:
             raise RuntimeError(f"No images found in {args.image_dir}")
 
         label_map = read_labels(args.labels_csv, args.label_col, args.label_offset)
-        frame_items, missing_labels = make_frame_items(
+        frame_items, missing_labels, missing_skeletons = make_frame_items(
             image_paths=image_paths,
             image_root=args.image_dir,
-            pose_cache_dir=args.pose_cache_dir,
+            skeleton_dir=args.skeleton_dir,
             label_map=label_map,
-            use_input_images_as_skeletons=use_input_images_as_skeletons,
         )
 
         print(
-            f"Found {len(image_paths)} images, matched {len(frame_items)} labels, "
-            f"missing labels for {len(missing_labels)} images."
+            f"Found {len(image_paths)} frames, matched {len(frame_items)} skeletons, "
+            f"missing labels for {len(missing_labels)} frames, "
+            f"missing skeleton files for {len(missing_skeletons)} frames."
         )
         if missing_labels:
             preview = ", ".join(path.name for path in missing_labels[:5])
             print(f"First missing-label images: {preview}")
+        if missing_skeletons:
+            preview = ", ".join(str(path) for path in missing_skeletons[:5])
+            print(f"First missing skeleton files: {preview}")
 
     if not frame_items:
         raise RuntimeError(
-            "No image frames are trainable; check manifest/labels and image paths."
+            "No skeleton frames are trainable; run extract_vitpose_skeletons.py first."
         )
 
     device = choose_device(args.device)
     print(f"Using device: {device}")
-
-    if not args.no_extract:
-        precompute_skeletons(frame_items, args, device)
-    else:
-        print(f"Skipping ViTPose extraction; using skeletons from {args.pose_cache_dir}")
-
-    frame_items = filter_existing_skeletons(frame_items)
-    if not frame_items:
-        raise RuntimeError("No skeleton frames available for training.")
+    print(f"Using skeletons from {args.skeleton_dir}")
 
     sequences = build_sequences(
         frame_items=frame_items,
