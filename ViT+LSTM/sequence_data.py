@@ -26,10 +26,11 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 FRAME_COLUMNS = ("frame", "image", "image_path", "path", "filename", "file")
 LABEL_COLUMNS = ("label", "Label", "target", "class", "class_id", "activity")
 SORT_COLUMNS = ("frame_index", "index", "idx", "timestamp", "time", "sort_key")
-TIMESTAMP_KEY_PREFIX = "timestamp:"
+TIMESTAMP_KEY_PREFIX = ""
 IMAGE_TIMESTAMP_PATTERN = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?"
 )
+ImageSize = tuple[int, int]
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,33 @@ def pil_bilinear_resample():
     return Image.BILINEAR
 
 
+def parse_image_size(value: object) -> ImageSize:
+    """Parse image size as WIDTHxHEIGHT, WIDTH,HEIGHT, or one square integer."""
+
+    if isinstance(value, (tuple, list)):
+        if len(value) != 2:
+            raise ValueError("Image size tuple/list must contain width and height.")
+        width, height = int(value[0]), int(value[1])
+    else:
+        text = str(value).strip().lower()
+        width = height = 0
+        for separator in ("x", ",", ":"):
+            if separator in text:
+                parts = [part.strip() for part in text.split(separator)]
+                if len(parts) != 2:
+                    raise ValueError(
+                        "Image size must be WIDTHxHEIGHT, WIDTH,HEIGHT, or one integer."
+                    )
+                width, height = int(parts[0]), int(parts[1])
+                break
+        else:
+            width = height = int(text)
+
+    if width <= 0 or height <= 0:
+        raise ValueError("Image width and height must be positive integers.")
+    return width, height
+
+
 def natural_sort_key(value: str | Path) -> tuple[object, ...]:
     """Sort strings with embedded numbers in human order, e.g. Trial2 before Trial10."""
 
@@ -133,13 +161,16 @@ def normalize_image_timestamp(filename_stem: str | Path) -> str:
 
 
 def filename_stem_from_path_text(value: str | Path) -> str:
-    """Extract a filename stem from a local path or URL-like manifest value."""
+    """Extract a filename stem from a local path or URL-like manifest value.
+    For example: "https://example.com/images/Trial1/frame_2024-01-01T12-00-00.123456789Z.jpg?token=abc#section"
+        would yield "frame_2024-01-01T12-00-00.123456789Z" for timestamp parsing and lookup.
+    """
 
-    text = unquote(str(value).strip())
-    parsed = urlparse(text)
-    path_text = parsed.path if parsed.scheme or parsed.netloc else text
-    path_text = path_text.split("?", 1)[0].split("#", 1)[0]
-    return Path(path_text).stem
+    text = unquote(str(value).strip()) # unquote() được sử dụng để giải mã các ký tự đặc biệt trong URL, chẳng hạn như %20 thành khoảng trắng. Điều này giúp đảm bảo rằng nếu manifest chứa các URL đã được mã hóa, chúng sẽ được giải mã đúng cách trước khi trích xuất phần tên tệp để phân tích timestamp và tra cứu.
+    parsed = urlparse(text) # urlparse() được sử dụng để phân tích cú pháp của chuỗi văn bản và trích xuất các thành phần khác nhau của URL, chẳng hạn như scheme (http, https), netloc (tên miền), path (đường dẫn), params, query, và fragment. Trong trường hợp này, urlparse() giúp xác định phần đường dẫn của URL để trích xuất tên tệp một cách chính xác, ngay cả khi manifest chứa các URL phức tạp với tham số truy vấn hoặc mảnh.
+    path_text = parsed.path if parsed.scheme or parsed.netloc else text # Đoạn mã này kiểm tra xem chuỗi văn bản đã được phân tích có chứa scheme (ví dụ: http, https) hoặc netloc (tên miền) hay không. Nếu có, nó sẽ sử dụng phần đường dẫn (path) của URL đã phân tích để trích xuất tên tệp. Nếu không, nó sẽ sử dụng toàn bộ chuỗi văn bản như một đường dẫn cục bộ. Điều này giúp đảm bảo rằng nếu manifest chứa các URL, phần tên tệp sẽ được trích xuất chính xác từ phần đường dẫn của URL, trong khi nếu manifest chứa các đường dẫn cục bộ, chúng sẽ được xử lý đúng cách.
+    path_text = path_text.split("?", 1)[0].split("#", 1)[0] # Đoạn mã này loại bỏ bất kỳ tham số truy vấn (phần sau dấu '?') hoặc mảnh (phần sau dấu '#') nào khỏi phần đường dẫn đã trích xuất. Điều này giúp đảm bảo rằng khi trích xuất tên tệp từ URL, chỉ phần đường dẫn chính sẽ được sử dụng, mà không bị ảnh hưởng bởi các tham số truy vấn hoặc mảnh có thể có trong URL. Ví dụ, nếu URL là "https://example.com/images/Trial1/frame_2024-01-01T12-00-00.123456789Z.jpg?token=abc#section", sau khi thực hiện đoạn mã này, phần đường dẫn sẽ trở thành "https://example.com/images/Trial1/frame_2024-01-01T12-00-00.123456789Z.jpg", giúp trích xuất tên tệp một cách chính xác.
+    return Path(path_text).stem # Path(path_text).stem được sử dụng để trích xuất phần tên tệp (filename stem) từ phần đường dẫn đã được làm sạch. Phần tên tệp là phần của tên tệp mà không bao gồm phần mở rộng (extension). Ví dụ, nếu phần đường dẫn là "https://example.com/images/Trial1/frame_2024-01-01T12-00-00.123456789Z.jpg", thì Path(path_text).stem sẽ trả về "frame_2024-01-01T12-00-00.123456789Z", giúp chuẩn bị cho việc phân tích timestamp và tra cứu trong manifest.
 
 
 def timestamp_lookup_keys(*values: str | Path) -> tuple[str, ...]:
@@ -450,7 +481,7 @@ def find_label_for_image(
     """Find the manifest label row for an image path discovered in a Trial folder."""
 
     resolved = image_path.resolve()
-    keys = [resolved.as_posix(), str(resolved)]
+    keys = [resolved.as_posix(), str(resolved)] # as_poxis() trả về một chuỗi đại diện cho đường dẫn của tệp, sử dụng dấu gạch chéo (/) làm dấu phân cách thư mục, ngay cả trên Windows. Điều này giúp đảm bảo rằng các khóa tra cứu được chuẩn hóa và có thể khớp với các giá trị trong manifest, bất kể hệ điều hành nào đang được sử dụng.
     try:
         keys.append(resolved.relative_to(image_dir.resolve()).as_posix())
     except ValueError:
@@ -675,11 +706,11 @@ def split_trial_sequence_groups(
 class SkeletonSequenceDataset(Dataset):
     """PyTorch Dataset that loads one skeleton-image sequence per item."""
 
-    def __init__(self, sequences: list[SequenceItem], image_size: int) -> None:
+    def __init__(self, sequences: list[SequenceItem], image_size: ImageSize | int) -> None:
         """Store sequence metadata and image resize settings."""
 
         self.sequences = sequences
-        self.image_size = image_size
+        self.image_size = parse_image_size(image_size)
         self.resample = pil_bilinear_resample()
 
     def __len__(self) -> int:
@@ -692,7 +723,7 @@ class SkeletonSequenceDataset(Dataset):
 
         with Image.open(image_path) as image_file:
             image = image_file.convert("RGB")
-        image = image.resize((self.image_size, self.image_size), self.resample)
+        image = image.resize(self.image_size, self.resample)
         array = np.asarray(image, dtype=np.float32) / 255.0
         return np.transpose(array, (2, 0, 1))
 
@@ -708,7 +739,7 @@ class SkeletonSequenceDataset(Dataset):
 
 def make_sequence_loader(
     sequences: list[SequenceItem],
-    image_size: int,
+    image_size: ImageSize | int,
     batch_size: int,
     shuffle: bool,
     num_workers: int,
@@ -732,7 +763,7 @@ def attach_datasets_and_loaders(
     train_sequences: list[SequenceItem],
     val_sequences: list[SequenceItem],
     test_sequences: list[SequenceItem],
-    image_size: int,
+    image_size: ImageSize | int,
     batch_size: int,
     num_workers: int,
     pin_memory: bool,
@@ -827,7 +858,7 @@ def prepare_sequence_data(
     test_split: float,
     seed: int,
     limit: int,
-    image_size: int,
+    image_size: ImageSize | int,
     batch_size: int,
     num_workers: int,
     pin_memory: bool,
@@ -837,9 +868,9 @@ def prepare_sequence_data(
     image_dir = Path(image_dir).resolve()
     skeleton_dir = Path(skeleton_dir).resolve()
     trial_dirs = find_trial_dirs(image_dir) # Hàm này return các thư mục Trial* có chứa ảnh, được sắp xếp theo thứ tự tự nhiên. Nó sẽ đi qua cấu trúc Subject*/Activity*/Camera*/Trial* và kiểm tra xem có ảnh nào trong mỗi thư mục Trial* không. Nếu có, nó sẽ thêm thư mục đó vào danh sách trial_dirs.
-    
+
     if limit > 0:
-        trial_dirs = trial_dirs[:limit] 
+        trial_dirs = trial_dirs[:limit]
     if not trial_dirs:
         raise RuntimeError(f"No Trial directories with images found in {image_dir}")
 
@@ -871,7 +902,7 @@ def prepare_sequence_data(
         test_split=test_split,
         seed=seed,
     )
-    
+
     sequences = [item for _, group in sequence_groups for item in group]
     total_inputs = sum(len(iter_trial_images(trial_dir)) for trial_dir in trial_dirs)
 
@@ -937,7 +968,7 @@ def save_sequence_data(bundle: SequenceDataBundle, output_path: Path) -> None:
 
 def load_sequence_data(
     sequence_data_path: Path,
-    image_size: int,
+    image_size: ImageSize | int,
     batch_size: int,
     num_workers: int,
     pin_memory: bool,
@@ -1007,7 +1038,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Limit number of Trial directories for quick debugging.",
     )
-    parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument(
+        "--image-size",
+        type=parse_image_size,
+        default=parse_image_size("224"),
+        help="Resize skeleton images as WIDTHxHEIGHT, WIDTH,HEIGHT, or one square integer.",
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument(

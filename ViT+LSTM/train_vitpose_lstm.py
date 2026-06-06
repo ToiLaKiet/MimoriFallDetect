@@ -24,6 +24,7 @@ from sequence_data import (  # noqa: E402
     SequenceDataBundle,
     SequenceItem,
     load_sequence_data,
+    parse_image_size,
 )
 from utils import evaluate_model, train_model  # noqa: E402
 
@@ -275,7 +276,12 @@ def parse_args() -> argparse.Namespace:
         choices=("auto", "cpu", "cuda", "mps"),
         help="Training/inference device. Default: auto.",
     )
-    parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument(
+        "--image-size",
+        type=parse_image_size,
+        default=parse_image_size("224"),
+        help="Resize skeleton images as WIDTHxHEIGHT, WIDTH,HEIGHT, or one square integer.",
+    )
     parser.add_argument("--num-classes", type=int, default=11)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=20)
