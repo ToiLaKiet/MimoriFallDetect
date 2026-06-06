@@ -508,27 +508,42 @@ def skeleton_cache_path(image_path: Path, image_root: Path, cache_root: Path) ->
 
 
 def find_trial_dirs(image_dir: Path) -> list[Path]:
-    """Find Subject*/Activity*/Camera*/Trial* directories that contain raw frames."""
+    """Find camera leaf dirs under Subject*/Activity*/Trial*/Camera* that contain frames."""
 
     image_dir = Path(image_dir)
     trial_dirs = []
+
+    def add_frame_dir(frame_dir: Path) -> None:
+        """Add one image-containing leaf directory to the sequence group list."""
+
+        if frame_dir.is_dir() and iter_trial_images(frame_dir):
+            trial_dirs.append(frame_dir)
+
     for subject_dir in sorted(image_dir.glob("Subject*"), key=natural_sort_key):
         if not subject_dir.is_dir():
             continue
         for activity_dir in sorted(subject_dir.glob("Activity*"), key=natural_sort_key):
             if not activity_dir.is_dir():
                 continue
+
+            for trial_dir in sorted(activity_dir.glob("Trial*"), key=natural_sort_key):
+                if not trial_dir.is_dir():
+                    continue
+                for camera_dir in sorted(trial_dir.glob("Camera*"), key=natural_sort_key):
+                    add_frame_dir(camera_dir)
+
+            # Backward-compatible fallback for older Subject/Activity/Camera/Trial layout.
             for camera_dir in sorted(activity_dir.glob("Camera*"), key=natural_sort_key):
                 if not camera_dir.is_dir():
                     continue
                 for trial_dir in sorted(camera_dir.glob("Trial*"), key=natural_sort_key):
-                    if trial_dir.is_dir() and iter_trial_images(trial_dir):
-                        trial_dirs.append(trial_dir)
-    return trial_dirs
+                    add_frame_dir(trial_dir)
+
+    return list(dict.fromkeys(trial_dirs))
 
 
 def trial_key_from_path(trial_dir: Path, image_dir: Path) -> str:
-    """Return a stable split/group key for one Trial directory."""
+    """Return a stable split/group key for one Trial/Camera frame directory."""
 
     try:
         return trial_dir.resolve().relative_to(image_dir.resolve()).as_posix()
@@ -537,7 +552,7 @@ def trial_key_from_path(trial_dir: Path, image_dir: Path) -> str:
 
 
 def iter_trial_images(trial_dir: Path) -> list[Path]:
-    """Return immediate image children of one Trial directory sorted by timestamp-like names."""
+    """Return immediate image children of one Trial/Camera dir sorted by timestamp."""
 
     return sorted(
         (
@@ -555,7 +570,7 @@ def frame_items_for_trial(
     skeleton_dir: Path,
     label_map: dict[str, LabelRow],
 ) -> tuple[list[FrameItem], list[Path], list[Path]]:
-    """Create ordered FrameItem objects for one Trial, skipping missing labels/skeletons."""
+    """Create ordered FrameItem objects for one Trial/Camera dir, skipping missing files."""
 
     trial_key = trial_key_from_path(trial_dir, image_dir)
     frame_items: list[FrameItem] = []
@@ -607,7 +622,7 @@ def build_trial_sequences(
     stride: int,
     label_mode: str,
 ) -> list[SequenceItem]:
-    """Build sliding-window sequences inside one Trial without crossing Trial boundaries."""
+    """Build sliding-window sequences inside one Trial/Camera group only."""
 
     if len(frame_items) < sequence_length:
         return []
@@ -634,7 +649,7 @@ def build_trial_sequence_groups(
     stride: int,
     label_mode: str,
 ) -> tuple[list[tuple[str, list[SequenceItem]]], list[Path], list[Path], int]:
-    """Build sequence groups per Trial and collect missing label/skeleton diagnostics."""
+    """Build sequence groups per Trial/Camera leaf and collect diagnostics."""
 
     groups: list[tuple[str, list[SequenceItem]]] = []
     missing_labels: list[Path] = []
@@ -678,7 +693,7 @@ def split_trial_sequence_groups(
     test_split: float,
     seed: int,
 ) -> tuple[list[SequenceItem], list[SequenceItem], list[SequenceItem]]:
-    """Split whole Trial groups into train/val/test so windows from one Trial stay together."""
+    """Split whole Trial/Camera groups so windows from one camera stay together."""
     shuffled = list(groups)
     random.Random(seed).shuffle(shuffled) # Đảm bảo rằng việc xáo trộn các nhóm Trial là ngẫu nhiên nhưng có thể tái tạo được bằng cách sử dụng seed. Điều này giúp đảm bảo rằng việc phân chia dữ liệu thành train/val/test không bị lệch và có thể được tái tạo trong các lần chạy khác nhau.
     total = len(shuffled)
@@ -863,16 +878,19 @@ def prepare_sequence_data(
     num_workers: int,
     pin_memory: bool,
 ) -> SequenceDataBundle:
-    """Create Trial-bounded sequences, split them, and attach Dataset/DataLoader objects."""
+    """Create Trial/Camera-bounded sequences, split them, and attach DataLoaders."""
 
     image_dir = Path(image_dir).resolve()
     skeleton_dir = Path(skeleton_dir).resolve()
-    trial_dirs = find_trial_dirs(image_dir) # Hàm này return các thư mục Trial* có chứa ảnh, được sắp xếp theo thứ tự tự nhiên. Nó sẽ đi qua cấu trúc Subject*/Activity*/Camera*/Trial* và kiểm tra xem có ảnh nào trong mỗi thư mục Trial* không. Nếu có, nó sẽ thêm thư mục đó vào danh sách trial_dirs.
+    trial_dirs = find_trial_dirs(image_dir)
 
     if limit > 0:
         trial_dirs = trial_dirs[:limit]
     if not trial_dirs:
-        raise RuntimeError(f"No Trial directories with images found in {image_dir}")
+        raise RuntimeError(
+            "No Subject*/Activity*/Trial*/Camera* directories with images found "
+            f"in {image_dir}"
+        )
 
     label_map = read_manifest_label_map(
         manifest_path=manifest_path,
@@ -1007,7 +1025,7 @@ def parse_args() -> argparse.Namespace:
     """Parse CLI arguments for creating the serialized sequence dataset."""
 
     parser = argparse.ArgumentParser(
-        description="Create a serialized Trial-bounded skeleton sequence dataset."
+        description="Create a serialized Trial/Camera-bounded skeleton sequence dataset."
     )
     parser.add_argument("--image-dir", type=Path, required=True)
     parser.add_argument("--manifest-path", type=Path, required=True)
@@ -1094,7 +1112,7 @@ def main() -> None:
         f"test={len(bundle.test_sequences)}) to {args.output}"
     )
     print(
-        f"Trials={bundle.trial_count} frames={bundle.total_inputs} "
+        f"Groups={bundle.trial_count} frames={bundle.total_inputs} "
         f"matched_frames={bundle.matched_frames} "
         f"missing_labels={len(bundle.missing_labels)} "
         f"missing_skeletons={len(bundle.missing_skeletons)}"

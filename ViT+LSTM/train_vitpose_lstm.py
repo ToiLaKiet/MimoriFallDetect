@@ -137,7 +137,7 @@ def report_sequence_data(data: SequenceDataBundle) -> None:
     """Print a short sanity report for the loaded serialized sequence dataset."""
 
     print(
-        f"Loaded {data.trial_count} Trial groups, {data.total_inputs} frames, "
+        f"Loaded {data.trial_count} Trial/Camera groups, {data.total_inputs} frames, "
         f"matched {data.matched_frames} skeleton frames, "
         f"missing labels for {len(data.missing_labels)} frames, "
         f"missing skeleton files for {len(data.missing_skeletons)} frames."
