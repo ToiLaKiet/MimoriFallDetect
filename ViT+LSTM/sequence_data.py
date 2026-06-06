@@ -10,7 +10,6 @@ import random
 import re
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import unquote, urlparse
@@ -25,20 +24,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 FRAME_COLUMNS = ("frame", "image", "image_path", "path", "filename", "file")
 LABEL_COLUMNS = ("label", "Label", "target", "class", "class_id", "activity")
-SORT_COLUMNS = ("frame_index", "index", "idx", "timestamp", "time", "sort_key")
-TIMESTAMP_KEY_PREFIX = ""
 IMAGE_TIMESTAMP_PATTERN = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?"
+    r"^\d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2}(?:\.\d+)?$"
 )
 ImageSize = tuple[int, int]
-
-
-@dataclass(frozen=True)
-class LabelRow:
-    """Manifest label metadata for one frame."""
-
-    label: int
-    sort_key: str
 
 
 @dataclass(frozen=True)
@@ -83,6 +72,7 @@ class SequenceDataBundle:
     trial_count: int
     missing_labels: tuple[Path, ...]
     missing_skeletons: tuple[Path, ...]
+    invalid_timestamps: tuple[str, ...]
 
 
 def pil_bilinear_resample():
@@ -128,36 +118,16 @@ def natural_sort_key(value: str | Path) -> tuple[object, ...]:
     return tuple(int(part) if part.isdigit() else part.lower() for part in parts)
 
 
-def normalize_image_timestamp(filename_stem: str | Path) -> str:
-    """Normalize timestamp-like image names from files/URLs to microsecond precision."""
+def normalize_image_timestamp_strict(filename_stem: str | Path) -> str | None:
+    """Normalize only exact image timestamp stems and ignore copied/derived names."""
 
     text = str(filename_stem).strip()
-    if "T" in text:
-        date_part, time_part = text.split("T", 1)
-        time_part = time_part.replace("_", ":", 2)
-        text = date_part + "T" + time_part
+    if not IMAGE_TIMESTAMP_PATTERN.match(text):
+        return None
 
-    match = IMAGE_TIMESTAMP_PATTERN.search(text)
-    if match is None:
-        raise ValueError(f"Cannot parse timestamp from: {filename_stem}")
-
-    timestamp = match.group()
-    if "." not in timestamp:
-        return timestamp
-
-    main_part, decimal_part = timestamp.split(".", 1)
-    if len(decimal_part) <= 6:
-        return timestamp
-
-    first_six = decimal_part[:6]
-    seventh_digit = int(decimal_part[6])
-    dt = datetime.strptime(
-        main_part + "." + first_six,
-        "%Y-%m-%dT%H:%M:%S.%f",
-    )
-    if seventh_digit >= 5:
-        dt = dt + timedelta(microseconds=1)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")
+    date_part, time_part = text.split("T", 1)
+    time_part = time_part.replace("_", ":", 2)
+    return date_part + "T" + time_part
 
 
 def filename_stem_from_path_text(value: str | Path) -> str:
@@ -171,31 +141,6 @@ def filename_stem_from_path_text(value: str | Path) -> str:
     path_text = parsed.path if parsed.scheme or parsed.netloc else text # Đoạn mã này kiểm tra xem chuỗi văn bản đã được phân tích có chứa scheme (ví dụ: http, https) hoặc netloc (tên miền) hay không. Nếu có, nó sẽ sử dụng phần đường dẫn (path) của URL đã phân tích để trích xuất tên tệp. Nếu không, nó sẽ sử dụng toàn bộ chuỗi văn bản như một đường dẫn cục bộ. Điều này giúp đảm bảo rằng nếu manifest chứa các URL, phần tên tệp sẽ được trích xuất chính xác từ phần đường dẫn của URL, trong khi nếu manifest chứa các đường dẫn cục bộ, chúng sẽ được xử lý đúng cách.
     path_text = path_text.split("?", 1)[0].split("#", 1)[0] # Đoạn mã này loại bỏ bất kỳ tham số truy vấn (phần sau dấu '?') hoặc mảnh (phần sau dấu '#') nào khỏi phần đường dẫn đã trích xuất. Điều này giúp đảm bảo rằng khi trích xuất tên tệp từ URL, chỉ phần đường dẫn chính sẽ được sử dụng, mà không bị ảnh hưởng bởi các tham số truy vấn hoặc mảnh có thể có trong URL. Ví dụ, nếu URL là "https://example.com/images/Trial1/frame_2024-01-01T12-00-00.123456789Z.jpg?token=abc#section", sau khi thực hiện đoạn mã này, phần đường dẫn sẽ trở thành "https://example.com/images/Trial1/frame_2024-01-01T12-00-00.123456789Z.jpg", giúp trích xuất tên tệp một cách chính xác.
     return Path(path_text).stem # Path(path_text).stem được sử dụng để trích xuất phần tên tệp (filename stem) từ phần đường dẫn đã được làm sạch. Phần tên tệp là phần của tên tệp mà không bao gồm phần mở rộng (extension). Ví dụ, nếu phần đường dẫn là "https://example.com/images/Trial1/frame_2024-01-01T12-00-00.123456789Z.jpg", thì Path(path_text).stem sẽ trả về "frame_2024-01-01T12-00-00.123456789Z", giúp chuẩn bị cho việc phân tích timestamp và tra cứu trong manifest.
-
-
-def timestamp_lookup_keys(*values: str | Path) -> tuple[str, ...]:
-    """Build normalized timestamp lookup keys from path strings, URLs, or filenames."""
-
-    keys: list[str] = []
-    for value in values:
-        candidates = (str(value), filename_stem_from_path_text(value))
-        for candidate in candidates:
-            if not candidate:
-                continue
-            try:
-                keys.append(TIMESTAMP_KEY_PREFIX + normalize_image_timestamp(candidate))
-            except ValueError:
-                pass
-    return tuple(dict.fromkeys(keys))
-
-
-def trial_image_sort_key(path: Path) -> tuple[object, ...]:
-    """Sort Trial images by normalized timestamp when filenames are timestamp-based."""
-
-    try:
-        return (0, normalize_image_timestamp(path.stem))
-    except ValueError:
-        return (1, natural_sort_key(path.name))
 
 
 def iter_images(image_dir: Path, limit: int = 0) -> list[Path]:
@@ -272,20 +217,6 @@ def parse_label(value: str, offset: int) -> int:
     """Parse numeric labels from manifest text and apply label_offset."""
 
     return int(float(value)) + offset
-
-
-def normalize_sort_key(value: str, row_index: int) -> str:
-    """Normalize numeric or timestamp values so lexical sort keeps chronological order."""
-
-    if not value:
-        return f"{row_index:012d}"
-    try:
-        return f"{int(float(value)):012d}"
-    except ValueError:
-        try:
-            return normalize_image_timestamp(value)
-        except ValueError:
-            return value
 
 
 def rows_from_json_manifest(data: object) -> list[dict[str, object]]:
@@ -380,120 +311,6 @@ def resolve_manifest_image_path(
     return ((image_dir or manifest_dir) / frame_path).resolve()
 
 
-def manifest_lookup_keys(
-    frame_value: str,
-    image_path: Path,
-    image_dir: Path,
-) -> tuple[str, ...]:
-    """Create path and timestamp lookup keys for manifest-to-frame matching."""
-
-    keys = [image_path.resolve().as_posix(), str(image_path.resolve())]
-    try:
-        keys.append(image_path.resolve().relative_to(image_dir.resolve()).as_posix())
-    except ValueError:
-        pass
-
-    raw_path = Path(frame_value).expanduser()
-    keys.append(raw_path.as_posix())
-    keys.append(str(raw_path))
-    keys.extend(timestamp_lookup_keys(frame_value))
-    return tuple(dict.fromkeys(key for key in keys if key))
-
-
-def read_manifest_label_map(
-    manifest_path: Path,
-    image_dir: Path,
-    frame_col: str,
-    label_col: str,
-    label_offset: int,
-    sort_col: str,
-    limit: int,
-) -> dict[str, LabelRow]:
-    """Build a path-keyed label map from manifest rows for frame lookup."""
-
-    manifest_path = Path(manifest_path).resolve()
-    if not manifest_path.is_file():
-        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
-
-    raw_rows = load_manifest_rows(manifest_path)
-    if limit > 0:
-        raw_rows = raw_rows[:limit]
-
-    label_map: dict[str, LabelRow] = {}
-    ambiguous_keys: set[str] = set()
-    duplicate_keys = 0
-    for row_index, row in enumerate(raw_rows):
-        frame_value = required_row_value(
-            row=row,
-            preferred=frame_col,
-            candidates=FRAME_COLUMNS,
-            row_index=row_index,
-            kind="frame",
-        )
-        label_value = required_row_value(
-            row=row,
-            preferred=label_col,
-            candidates=LABEL_COLUMNS,
-            row_index=row_index,
-            kind="label",
-        )
-        image_path = resolve_manifest_image_path(
-            frame_value=frame_value,
-            image_dir=image_dir,
-            manifest_dir=manifest_path.parent,
-        )
-        sort_value = first_row_value(row, sort_col, SORT_COLUMNS) or image_path.name
-        label_row = LabelRow(
-            label=parse_label(label_value, label_offset),
-            sort_key=normalize_sort_key(sort_value, row_index),
-        )
-
-        for key in manifest_lookup_keys(frame_value, image_path, image_dir):
-            if key in ambiguous_keys:
-                duplicate_keys += 1
-                continue
-
-            existing = label_map.get(key)
-            if existing is not None:
-                duplicate_keys += 1
-                if existing.label != label_row.label:
-                    label_map.pop(key, None)
-                    ambiguous_keys.add(key)
-                continue
-
-            label_map[key] = label_row
-
-    if duplicate_keys:
-        print(f"Warning: {duplicate_keys} duplicate manifest lookup keys were repeated.")
-    if ambiguous_keys:
-        print(
-            "Warning: "
-            f"{len(ambiguous_keys)} manifest lookup keys had conflicting labels and were ignored."
-        )
-    return label_map
-
-
-def find_label_for_image(
-    image_path: Path,
-    image_dir: Path,
-    label_map: dict[str, LabelRow],
-) -> LabelRow | None:
-    """Find the manifest label row for an image path discovered in a Trial folder."""
-
-    resolved = image_path.resolve()
-    keys = [resolved.as_posix(), str(resolved)] # as_poxis() trả về một chuỗi đại diện cho đường dẫn của tệp, sử dụng dấu gạch chéo (/) làm dấu phân cách thư mục, ngay cả trên Windows. Điều này giúp đảm bảo rằng các khóa tra cứu được chuẩn hóa và có thể khớp với các giá trị trong manifest, bất kể hệ điều hành nào đang được sử dụng.
-    try:
-        keys.append(resolved.relative_to(image_dir.resolve()).as_posix())
-    except ValueError:
-        pass
-    keys.extend(timestamp_lookup_keys(resolved.as_posix()))
-
-    for key in dict.fromkeys(keys):
-        if key in label_map:
-            return label_map[key]
-    return None
-
-
 def skeleton_cache_path(image_path: Path, image_root: Path, cache_root: Path) -> Path:
     """Map a raw image path to the mirrored skeleton PNG path under cache_root."""
 
@@ -507,101 +324,105 @@ def skeleton_cache_path(image_path: Path, image_root: Path, cache_root: Path) ->
     return cache_root / rel_path.with_suffix(".png")
 
 
-def find_trial_dirs(image_dir: Path) -> list[Path]:
-    """Find camera leaf dirs under Subject*/Activity*/Trial*/Camera* that contain frames."""
-
-    image_dir = Path(image_dir)
-    trial_dirs = []
-
-    def add_frame_dir(frame_dir: Path) -> None:
-        """Add one image-containing leaf directory to the sequence group list."""
-
-        if frame_dir.is_dir() and iter_trial_images(frame_dir):
-            trial_dirs.append(frame_dir)
-
-    for subject_dir in sorted(image_dir.glob("Subject*"), key=natural_sort_key):
-        if not subject_dir.is_dir():
-            continue
-        for activity_dir in sorted(subject_dir.glob("Activity*"), key=natural_sort_key):
-            if not activity_dir.is_dir():
-                continue
-
-            for trial_dir in sorted(activity_dir.glob("Trial*"), key=natural_sort_key):
-                if not trial_dir.is_dir():
-                    continue
-                for camera_dir in sorted(trial_dir.glob("Camera*"), key=natural_sort_key):
-                    add_frame_dir(camera_dir)
-
-            # Backward-compatible fallback for older Subject/Activity/Camera/Trial layout.
-            for camera_dir in sorted(activity_dir.glob("Camera*"), key=natural_sort_key):
-                if not camera_dir.is_dir():
-                    continue
-                for trial_dir in sorted(camera_dir.glob("Trial*"), key=natural_sort_key):
-                    add_frame_dir(trial_dir)
-
-    return list(dict.fromkeys(trial_dirs))
-
-
 def trial_key_from_path(trial_dir: Path, image_dir: Path) -> str:
     """Return a stable split/group key for one Trial/Camera frame directory."""
 
     try:
         return trial_dir.resolve().relative_to(image_dir.resolve()).as_posix()
+    # vi du : Nếu image_dir là "/data/images" và trial_dir là "/data/images/Trial1/CameraA", thì trial_dir.resolve() sẽ trả về "/data/images/Trial1/CameraA" và image_dir.resolve() sẽ trả về "/data/images". Khi gọi trial_dir.resolve().relative_to(image_dir.resolve()), nó sẽ trả về "Trial1/CameraA", đây là phần còn lại của đường dẫn sau khi loại bỏ phần gốc. Tuy nhiên, nếu trial_dir không nằm trong image_dir, ví dụ: trial_dir là "/other/path/Trial1/CameraA", thì trial_dir.resolve().relative_to(image_dir.resolve
     except ValueError:
         return trial_dir.resolve().as_posix()
 
 
-def iter_trial_images(trial_dir: Path) -> list[Path]:
-    """Return immediate image children of one Trial/Camera dir sorted by timestamp."""
-
-    return sorted(
-        (
-            path
-            for path in Path(trial_dir).iterdir()
-            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-        ),
-        key=trial_image_sort_key,
-    )
-
-
-def frame_items_for_trial(
-    trial_dir: Path,
+def build_manifest_sequence_groups(
+    manifest_path: Path,
     image_dir: Path,
     skeleton_dir: Path,
-    label_map: dict[str, LabelRow],
-) -> tuple[list[FrameItem], list[Path], list[Path]]:
-    """Create ordered FrameItem objects for one Trial/Camera dir, skipping missing files."""
+    frame_col: str,
+    label_col: str,
+    label_offset: int,
+    sequence_length: int,
+    stride: int,
+    label_mode: str,
+    limit: int,
+) -> tuple[list[tuple[str, list[SequenceItem]]], list[Path], list[str], int, int]:
+    """Build sequence groups directly from manifest rows instead of scanning folders."""
 
-    trial_key = trial_key_from_path(trial_dir, image_dir)
-    frame_items: list[FrameItem] = []
-    missing_labels: list[Path] = []
+    manifest_path = Path(manifest_path).resolve()
+    raw_rows = load_manifest_rows(manifest_path)
+    if limit > 0:
+        raw_rows = raw_rows[:limit]
+
+    grouped_frames: dict[str, list[FrameItem]] = {}
     missing_skeletons: list[Path] = []
+    invalid_timestamps: list[str] = []
+    matched_frames = 0
 
-    for image_path in iter_trial_images(trial_dir):
-        label_row = find_label_for_image(image_path, image_dir, label_map)
-        if label_row is None:
-            missing_labels.append(image_path)
+    for row_index, row in enumerate(raw_rows):
+        frame_value = required_row_value(
+            row=row,
+            preferred=frame_col,
+            candidates=FRAME_COLUMNS,
+            row_index=row_index,
+            kind="frame",
+        )
+        timestamp = normalize_image_timestamp_strict(
+            filename_stem_from_path_text(frame_value)
+        )
+        if timestamp is None:
+            invalid_timestamps.append(frame_value)
             continue
 
+        label_value = required_row_value(
+            row=row,
+            preferred=label_col,
+            candidates=LABEL_COLUMNS,
+            row_index=row_index,
+            kind="label",
+        )
+        image_path = resolve_manifest_image_path(
+            frame_value=frame_value,
+            image_dir=image_dir,
+            manifest_dir=manifest_path.parent,
+        )
         skeleton_path = skeleton_cache_path(image_path, image_dir, skeleton_dir)
         if not skeleton_path.is_file():
             missing_skeletons.append(skeleton_path)
             continue
 
-        frame_items.append(
+        group_key = trial_key_from_path(image_path.parent, image_dir)
+        grouped_frames.setdefault(group_key, []).append(
             FrameItem(
                 image_path=image_path,
                 skeleton_path=skeleton_path,
-                label=label_row.label,
-                trial_key=trial_key,
-                sort_key=label_row.sort_key or image_path.name,
+                label=parse_label(label_value, label_offset),
+                trial_key=group_key,
+                sort_key=timestamp,
             )
         )
+        matched_frames += 1
+
+    sequence_groups: list[tuple[str, list[SequenceItem]]] = []
+    for group_key in sorted(grouped_frames, key=natural_sort_key):
+        frame_items = sorted(
+            grouped_frames[group_key],
+            key=lambda item: (item.sort_key, natural_sort_key(item.image_path.name)),
+        )
+        sequences = build_trial_sequences(
+            frame_items=frame_items,
+            sequence_length=sequence_length,
+            stride=stride,
+            label_mode=label_mode,
+        )
+        if sequences:
+            sequence_groups.append((group_key, sequences))
 
     return (
-        sorted(frame_items, key=lambda item: (item.sort_key, natural_sort_key(item.image_path.name))),
-        missing_labels,
+        sequence_groups,
         missing_skeletons,
+        invalid_timestamps,
+        len(raw_rows),
+        matched_frames,
     )
 
 
@@ -638,45 +459,6 @@ def build_trial_sequences(
             )
         )
     return sequences
-
-
-def build_trial_sequence_groups(
-    trial_dirs: list[Path],
-    image_dir: Path,
-    skeleton_dir: Path,
-    label_map: dict[str, LabelRow],
-    sequence_length: int,
-    stride: int,
-    label_mode: str,
-) -> tuple[list[tuple[str, list[SequenceItem]]], list[Path], list[Path], int]:
-    """Build sequence groups per Trial/Camera leaf and collect diagnostics."""
-
-    groups: list[tuple[str, list[SequenceItem]]] = []
-    missing_labels: list[Path] = []
-    missing_skeletons: list[Path] = []
-    matched_frames = 0
-
-    for trial_dir in trial_dirs:
-        frame_items, trial_missing_labels, trial_missing_skeletons = frame_items_for_trial(
-            trial_dir=trial_dir,
-            image_dir=image_dir,
-            skeleton_dir=skeleton_dir,
-            label_map=label_map,
-        )
-        missing_labels.extend(trial_missing_labels)
-        missing_skeletons.extend(trial_missing_skeletons)
-        matched_frames += len(frame_items)
-
-        trial_sequences = build_trial_sequences(
-            frame_items=frame_items,
-            sequence_length=sequence_length,
-            stride=stride,
-            label_mode=label_mode,
-        )
-        if trial_sequences:
-            groups.append((trial_key_from_path(trial_dir, image_dir), trial_sequences))
-
-    return groups, missing_labels, missing_skeletons, matched_frames
 
 
 def split_count(total: int, fraction: float) -> int:
@@ -788,6 +570,7 @@ def attach_datasets_and_loaders(
     trial_count: int,
     missing_labels: Iterable[Path],
     missing_skeletons: Iterable[Path],
+    invalid_timestamps: Iterable[str] = (),
 ) -> SequenceDataBundle:
     """Attach PyTorch Dataset/DataLoader objects to sequence splits."""
 
@@ -855,6 +638,7 @@ def attach_datasets_and_loaders(
         trial_count=trial_count,
         missing_labels=tuple(missing_labels),
         missing_skeletons=tuple(missing_skeletons),
+        invalid_timestamps=tuple(invalid_timestamps),
     )
 
 
@@ -864,7 +648,6 @@ def prepare_sequence_data(
     frame_col: str,
     label_col: str,
     label_offset: int,
-    sort_col: str,
     skeleton_dir: Path,
     sequence_length: int,
     stride: int,
@@ -878,42 +661,25 @@ def prepare_sequence_data(
     num_workers: int,
     pin_memory: bool,
 ) -> SequenceDataBundle:
-    """Create Trial/Camera-bounded sequences, split them, and attach DataLoaders."""
+    """Create Trial/Camera-bounded sequences from manifest rows and attach DataLoaders."""
 
     image_dir = Path(image_dir).resolve()
     skeleton_dir = Path(skeleton_dir).resolve()
-    trial_dirs = find_trial_dirs(image_dir)
-
-    if limit > 0:
-        trial_dirs = trial_dirs[:limit]
-    if not trial_dirs:
-        raise RuntimeError(
-            "No Subject*/Activity*/Trial*/Camera* directories with images found "
-            f"in {image_dir}"
-        )
-
-    label_map = read_manifest_label_map(
-        manifest_path=manifest_path,
-        image_dir=image_dir,
-        frame_col=frame_col,
-        label_col=label_col,
-        label_offset=label_offset,
-        sort_col=sort_col,
-        limit=0,
-    )
-    sequence_groups, missing_labels, missing_skeletons, matched_frames = (
-        build_trial_sequence_groups(
-            trial_dirs=trial_dirs,
+    sequence_groups, missing_skeletons, invalid_timestamps, total_inputs, matched_frames = (
+        build_manifest_sequence_groups(
+            manifest_path=manifest_path,
             image_dir=image_dir,
             skeleton_dir=skeleton_dir,
-            label_map=label_map,
+            frame_col=frame_col,
+            label_col=label_col,
+            label_offset=label_offset,
             sequence_length=sequence_length,
             stride=stride,
             label_mode=sequence_label_mode,
+            limit=limit,
         )
     )
 
-    # Cần kiểm tra coi là nó chia như thế nào, có hợp lý không.
     train_sequences, val_sequences, test_sequences = split_trial_sequence_groups(
         groups=sequence_groups,
         val_split=val_split,
@@ -922,7 +688,6 @@ def prepare_sequence_data(
     )
 
     sequences = [item for _, group in sequence_groups for item in group]
-    total_inputs = sum(len(iter_trial_images(trial_dir)) for trial_dir in trial_dirs)
 
     return attach_datasets_and_loaders(
         sequences=sequences,
@@ -933,12 +698,13 @@ def prepare_sequence_data(
         batch_size=batch_size,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        source_kind="trial_folders",
+        source_kind="manifest_rows",
         total_inputs=total_inputs,
         matched_frames=matched_frames,
-        trial_count=len(trial_dirs),
-        missing_labels=missing_labels,
+        trial_count=len(sequence_groups),
+        missing_labels=(),
         missing_skeletons=missing_skeletons,
+        invalid_timestamps=invalid_timestamps,
     )
 
 
@@ -976,6 +742,7 @@ def save_sequence_data(bundle: SequenceDataBundle, output_path: Path) -> None:
         "trial_count": bundle.trial_count,
         "missing_labels": [str(path) for path in bundle.missing_labels],
         "missing_skeletons": [str(path) for path in bundle.missing_skeletons],
+        "invalid_timestamps": list(bundle.invalid_timestamps),
         "sequences": [sequence_item_to_dict(item) for item in bundle.sequences],
         "train_sequences": [sequence_item_to_dict(item) for item in bundle.train_sequences],
         "val_sequences": [sequence_item_to_dict(item) for item in bundle.val_sequences],
@@ -1018,6 +785,7 @@ def load_sequence_data(
         trial_count=int(data.get("trial_count", 0)),
         missing_labels=tuple(Path(path) for path in data.get("missing_labels", [])),
         missing_skeletons=tuple(Path(path) for path in data.get("missing_skeletons", [])),
+        invalid_timestamps=tuple(str(value) for value in data.get("invalid_timestamps", [])),
     )
 
 
@@ -1025,12 +793,11 @@ def parse_args() -> argparse.Namespace:
     """Parse CLI arguments for creating the serialized sequence dataset."""
 
     parser = argparse.ArgumentParser(
-        description="Create a serialized Trial/Camera-bounded skeleton sequence dataset."
+        description="Create a serialized skeleton sequence dataset from manifest rows."
     )
     parser.add_argument("--image-dir", type=Path, required=True)
     parser.add_argument("--manifest-path", type=Path, required=True)
     parser.add_argument("--frame-col", default="")
-    parser.add_argument("--sort-col", default="")
     parser.add_argument(
         "--skeleton-dir",
         "--pose-cache-dir",
@@ -1054,7 +821,7 @@ def parse_args() -> argparse.Namespace:
         "--limit",
         type=int,
         default=0,
-        help="Limit number of Trial directories for quick debugging.",
+        help="Limit number of manifest rows for quick debugging.",
     )
     parser.add_argument(
         "--image-size",
@@ -1091,7 +858,6 @@ def main() -> None:
         frame_col=args.frame_col,
         label_col=args.label_col,
         label_offset=args.label_offset,
-        sort_col=args.sort_col,
         skeleton_dir=args.skeleton_dir,
         sequence_length=args.sequence_length,
         stride=args.stride,
@@ -1115,7 +881,8 @@ def main() -> None:
         f"Groups={bundle.trial_count} frames={bundle.total_inputs} "
         f"matched_frames={bundle.matched_frames} "
         f"missing_labels={len(bundle.missing_labels)} "
-        f"missing_skeletons={len(bundle.missing_skeletons)}"
+        f"missing_skeletons={len(bundle.missing_skeletons)} "
+        f"invalid_timestamps={len(bundle.invalid_timestamps)}"
     )
 
 

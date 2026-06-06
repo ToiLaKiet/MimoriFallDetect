@@ -140,7 +140,8 @@ def report_sequence_data(data: SequenceDataBundle) -> None:
         f"Loaded {data.trial_count} Trial/Camera groups, {data.total_inputs} frames, "
         f"matched {data.matched_frames} skeleton frames, "
         f"missing labels for {len(data.missing_labels)} frames, "
-        f"missing skeleton files for {len(data.missing_skeletons)} frames."
+        f"missing skeleton files for {len(data.missing_skeletons)} frames, "
+        f"invalid timestamps for {len(data.invalid_timestamps)} manifest rows."
     )
 
     if data.missing_labels:
@@ -149,6 +150,9 @@ def report_sequence_data(data: SequenceDataBundle) -> None:
     if data.missing_skeletons:
         preview = ", ".join(str(path) for path in data.missing_skeletons[:5])
         print(f"First missing skeleton files: {preview}")
+    if data.invalid_timestamps:
+        preview = ", ".join(data.invalid_timestamps[:5])
+        print(f"First invalid timestamp rows: {preview}")
 
 
 def run_train(
