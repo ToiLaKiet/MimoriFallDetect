@@ -18,9 +18,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from train_vitpose_lstm import (  # noqa: E402
+from sequence_data import (  # noqa: E402
     FRAME_COLUMNS,
-    choose_device,
     iter_images,
     load_manifest_rows,
     required_row_value,
@@ -57,12 +56,16 @@ RIGHT_KEYPOINTS = {2, 4, 6, 8, 10, 12, 14, 16}
 
 
 def pil_bilinear_resample():
+    """Return the Pillow bilinear resize enum for old and new Pillow versions."""
+
     if hasattr(Image, "Resampling"):
         return Image.Resampling.BILINEAR
     return Image.BILINEAR
 
 
 def configure_runtime_cache() -> None:
+    """Point model/runtime caches to a writable temp folder before loading transformers."""
+
     cache_root = Path(tempfile.gettempdir()) / "vitpose-extract-cache"
     for child in ("matplotlib", "xdg"):
         (cache_root / child).mkdir(parents=True, exist_ok=True)
@@ -71,7 +74,32 @@ def configure_runtime_cache() -> None:
     os.environ.setdefault("XDG_CACHE_HOME", str(cache_root / "xdg"))
 
 
+def choose_device(requested: str) -> torch.device:
+    """Resolve auto/cpu/cuda/mps into a usable torch.device with safe fallback messages."""
+
+    if requested == "auto":
+        if torch.cuda.is_available():
+            requested = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            requested = "mps"
+        else:
+            requested = "cpu"
+
+    if requested == "cuda" and not torch.cuda.is_available():
+        print("CUDA is not available; falling back to CPU.")
+        requested = "cpu"
+    if requested == "mps" and not (
+        hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+    ):
+        print("MPS is not available; falling back to CPU.")
+        requested = "cpu"
+
+    return torch.device(requested)
+
+
 def xyxy_to_xywh(boxes_xyxy: np.ndarray) -> np.ndarray:
+    """Convert detector boxes from x1,y1,x2,y2 format to x,y,width,height format."""
+
     boxes_xywh = boxes_xyxy.astype(np.float32, copy=True)
     boxes_xywh[:, 2] = boxes_xywh[:, 2] - boxes_xywh[:, 0]
     boxes_xywh[:, 3] = boxes_xywh[:, 3] - boxes_xywh[:, 1]
@@ -79,6 +107,8 @@ def xyxy_to_xywh(boxes_xyxy: np.ndarray) -> np.ndarray:
 
 
 def resize_for_inference(image: Image.Image, max_side: int) -> Image.Image:
+    """Resize the long image side before detection/pose inference to reduce memory use."""
+
     if max_side <= 0:
         return image
 
@@ -93,6 +123,8 @@ def resize_for_inference(image: Image.Image, max_side: int) -> Image.Image:
 
 
 def keypoint_color(index: int) -> tuple[int, int, int]:
+    """Choose drawing color by COCO keypoint side: left, right, or center."""
+
     if index in LEFT_KEYPOINTS:
         return (25, 160, 255)
     if index in RIGHT_KEYPOINTS:
@@ -105,6 +137,8 @@ def draw_skeleton(
     persons: list[dict[str, np.ndarray]],
     keypoint_threshold: float,
 ) -> Image.Image:
+    """Render detected keypoints/limbs into a black RGB skeleton image."""
+
     canvas = Image.new("RGB", image_size, (0, 0, 0))
     draw = ImageDraw.Draw(canvas)
     width, height = image_size
@@ -141,6 +175,8 @@ def draw_skeleton(
 
 
 class VitPoseSkeletonExtractor:
+    """Pipeline wrapper that detects one person and draws a ViTPose skeleton image."""
+
     def __init__(
         self,
         detector_model_name: str,
@@ -148,10 +184,11 @@ class VitPoseSkeletonExtractor:
         device: torch.device,
         detection_threshold: float,
         keypoint_threshold: float,
-        max_persons: int,
         max_side: int,
         save_blank_on_miss: bool,
     ) -> None:
+        """Load RT-DETR and ViTPose models once, then reuse them for every frame."""
+
         configure_runtime_cache()
 
         from transformers import (  # noqa: PLC0415
@@ -182,6 +219,8 @@ class VitPoseSkeletonExtractor:
 
     @torch.no_grad()
     def detect_people(self, image: Image.Image) -> tuple[np.ndarray, np.ndarray]:
+        """Detect people and keep only the bbox with the largest area for this frame."""
+
         inputs = self.det_processor(images=image, return_tensors="pt").to(self.device)
         outputs = self.det_model(**inputs)
         results = self.det_processor.post_process_object_detection(
@@ -209,6 +248,8 @@ class VitPoseSkeletonExtractor:
         image: Image.Image,
         boxes_xywh: np.ndarray,
     ) -> list[dict[str, np.ndarray]]:
+        """Estimate COCO keypoints for the selected person bounding box."""
+
         if len(boxes_xywh) == 0:
             return []
 
@@ -236,6 +277,8 @@ class VitPoseSkeletonExtractor:
         return persons
 
     def extract_one(self, image_path: Path, output_path: Path) -> bool:
+        """Extract one skeleton PNG from one raw image and return whether a person was found."""
+
         with Image.open(image_path) as image_file:
             image = image_file.convert("RGB")
 
@@ -258,6 +301,8 @@ def image_paths_from_manifest(
     frame_col: str,
     limit: int,
 ) -> list[Path]:
+    """Read frame paths from a manifest so extraction follows the manifest image list."""
+
     manifest_path = Path(manifest_path).resolve()
     raw_rows = load_manifest_rows(manifest_path)
     if limit > 0:
@@ -283,6 +328,8 @@ def image_paths_from_manifest(
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI args for skeleton extraction and cache-writing behavior."""
+
     parser = argparse.ArgumentParser(
         description="Extract skeleton images from raw frames with RT-DETR + ViTPose."
     )
@@ -341,6 +388,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Collect images, extract mirrored skeleton PNGs, and print progress counters."""
+
     args = parse_args()
 
     if args.manifest_path is not None:
@@ -351,7 +400,6 @@ def main() -> None:
         args.image_dir = args.manifest_path.parent
     args.image_dir = args.image_dir.resolve()
     args.skeleton_dir = args.skeleton_dir.resolve()
-    args.max_persons = max(1, args.max_persons)
     args.log_every = max(1, args.log_every)
 
     if args.manifest_path is not None:
@@ -375,7 +423,6 @@ def main() -> None:
         device=device,
         detection_threshold=args.det_thr,
         keypoint_threshold=args.kpt_thr,
-        max_persons=args.max_persons,
         max_side=args.max_side,
         save_blank_on_miss=args.save_blank_on_miss,
     )

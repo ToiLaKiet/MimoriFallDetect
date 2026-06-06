@@ -1,33 +1,73 @@
+"""Training helpers for sequence-level skeleton-image classification."""
+
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn as nn
 
-def _unpack_batch(batch):
-    if isinstance(batch, dict):
-        image_keys = ("images", "image", "x", "inputs", "sequence")
-        label_keys = ("labels", "label", "y", "target", "targets")
 
-        x = next((batch[key] for key in image_keys if key in batch), None)
-        y = next((batch[key] for key in label_keys if key in batch), None)
+SEQUENCE_KEYS = (
+    "sequences",
+    "sequence",
+    "skeleton_sequences",
+    "skeletons",
+    "images",
+    "x",
+    "inputs",
+)
+LABEL_KEYS = (
+    "sequence_labels",
+    "labels",
+    "label",
+    "y",
+    "target",
+    "targets",
+)
+
+
+def _unpack_batch(batch: Any) -> tuple[Any, Any]:
+    """Extract sequence tensors and sequence labels from tuple/list or dict batches."""
+
+    if isinstance(batch, dict):
+        x = next((batch[key] for key in SEQUENCE_KEYS if key in batch), None)
+        y = next((batch[key] for key in LABEL_KEYS if key in batch), None)
         if x is None or y is None:
             raise KeyError(
-                "Batch dict must contain image sequence and label keys, "
-                "for example 'images' and 'labels'."
+                "Batch dict must contain a skeleton sequence and one sequence label, "
+                "for example 'sequences' and 'sequence_labels'."
             )
         return x, y
 
     if isinstance(batch, (tuple, list)) and len(batch) >= 2:
         return batch[0], batch[1]
 
-    raise TypeError("Batch must be a tuple/list (images, labels) or a dict.")
+    raise TypeError(
+        "Batch must be (sequences, sequence_labels) or a dict with sequence/label keys."
+    )
 
 
-def _to_device(x, y, device):
+def _as_sequence_tensor(x: Any) -> torch.Tensor:
+    """Convert raw sequence input into a float tensor with shape B,T,C,H,W."""
+
     if not torch.is_tensor(x):
         x = torch.tensor(x, dtype=torch.float32)
     else:
         x = x.float()
+
+    if x.ndim != 5:
+        raise ValueError(
+            "Expected sequence batch with shape "
+            "(batch, sequence_length, channels, height, width). "
+            f"Got shape {tuple(x.shape)}."
+        )
+    return x
+
+
+def _as_sequence_labels(y: Any) -> torch.Tensor:
+    """Convert raw labels into one class id per sequence with shape B."""
 
     if not torch.is_tensor(y):
         y = torch.tensor(y, dtype=torch.long)
@@ -36,25 +76,55 @@ def _to_device(x, y, device):
 
     if y.ndim > 1 and y.size(-1) == 1:
         y = y.view(-1)
+    if y.ndim != 1:
+        raise ValueError(
+            "Expected one label per sequence with shape (batch,). "
+            "Do not pass per-frame labels with shape (batch, sequence_length)."
+        )
+    return y
 
+
+def _to_device(x: Any, y: Any, device: torch.device | str) -> tuple[torch.Tensor, torch.Tensor]:
+    """Move one validated sequence batch and its labels onto the target device."""
+
+    x = _as_sequence_tensor(x)
+    y = _as_sequence_labels(y)
+    if x.size(0) != y.size(0):
+        raise ValueError(
+            "Sequence batch and labels must have the same batch size. "
+            f"Got {x.size(0)} sequences and {y.size(0)} labels."
+        )
     return x.to(device), y.to(device)
 
 
+def sequence_batch_size(x: torch.Tensor, y: torch.Tensor) -> int:
+    """Return the number of sequences in a validated batch."""
+
+    if x.size(0) != y.size(0):
+        raise ValueError(
+            "Sequence batch and labels must have the same batch size. "
+            f"Got {x.size(0)} sequences and {y.size(0)} labels."
+        )
+    return x.size(0)
+
+
 def train_one_epoch(
-    model,
+    model: nn.Module,
     train_loader,
-    optimizer,
-    criterion=None,
-    device=None,
-    grad_clip=None,
-):
+    optimizer: torch.optim.Optimizer,
+    criterion: nn.Module | None = None,
+    device: torch.device | str | None = None,
+    grad_clip: float | None = None,
+) -> dict[str, float]:
+    """Train for one epoch using complete skeleton sequences as training samples."""
+
     criterion = criterion or nn.CrossEntropyLoss()
     device = device or next(model.parameters()).device
     model.train()
 
     total_loss = 0.0
     total_correct = 0
-    total_samples = 0
+    total_sequences = 0
 
     for batch in train_loader:
         x, y = _unpack_batch(batch)
@@ -70,26 +140,33 @@ def train_one_epoch(
 
         optimizer.step()
 
-        batch_size = y.size(0)
-        total_loss += loss.item() * batch_size
+        batch_sequences = sequence_batch_size(x, y)
+        total_loss += loss.item() * batch_sequences
         total_correct += (logits.argmax(dim=1) == y).sum().item()
-        total_samples += batch_size
+        total_sequences += batch_sequences
 
     return {
-        "loss": total_loss / max(total_samples, 1),
-        "accuracy": total_correct / max(total_samples, 1),
+        "loss": total_loss / max(total_sequences, 1),
+        "accuracy": total_correct / max(total_sequences, 1),
     }
 
 
 @torch.no_grad()
-def evaluate_model(model, data_loader, criterion=None, device=None):
+def evaluate_model(
+    model: nn.Module,
+    data_loader,
+    criterion: nn.Module | None = None,
+    device: torch.device | str | None = None,
+) -> dict[str, float]:
+    """Evaluate loss and accuracy over sequence-level samples."""
+
     criterion = criterion or nn.CrossEntropyLoss()
     device = device or next(model.parameters()).device
     model.eval()
 
     total_loss = 0.0
     total_correct = 0
-    total_samples = 0
+    total_sequences = 0
 
     for batch in data_loader:
         x, y = _unpack_batch(batch)
@@ -98,42 +175,40 @@ def evaluate_model(model, data_loader, criterion=None, device=None):
         logits = model(x)
         loss = criterion(logits, y)
 
-        batch_size = y.size(0)
-        total_loss += loss.item() * batch_size
+        batch_sequences = sequence_batch_size(x, y)
+        total_loss += loss.item() * batch_sequences
         total_correct += (logits.argmax(dim=1) == y).sum().item()
-        total_samples += batch_size
+        total_sequences += batch_sequences
 
     return {
-        "loss": total_loss / max(total_samples, 1),
-        "accuracy": total_correct / max(total_samples, 1),
+        "loss": total_loss / max(total_sequences, 1),
+        "accuracy": total_correct / max(total_sequences, 1),
     }
 
 
 def train_model(
-    model,
+    model: nn.Module,
     train_loader,
     val_loader=None,
-    epochs=20,
-    lr=1e-3,
-    optimizer=None,
-    criterion=None,
-    device=None,
-    grad_clip=1.0,
+    epochs: int = 20,
+    lr: float = 1e-3,
+    optimizer: torch.optim.Optimizer | None = None,
+    criterion: nn.Module | None = None,
+    device: torch.device | str | None = None,
+    grad_clip: float | None = 1.0,
     scheduler=None,
-    checkpoint_path=None,
-):
+    checkpoint_path: Path | str | None = None,
+) -> list[dict[str, float]]:
     """
-    Train CNN + LSTM classifier on skeleton image sequences.
+    Train a CNN+LSTM classifier on skeleton-image sequences.
 
     Expected batch:
-        images shape = (batch_size, 10, 3, height, width)
+        sequences shape = (batch_size, sequence_length, 3, height, width)
         labels shape = (batch_size,)
 
-    Labels:
-        Activity1 -> 0
-        Activity2 -> 1
-        ...
-        Activity11 -> 10
+    Each optimizer step treats one sliding-window sequence as one sample. Frames
+    inside the window are encoded by the model and are not optimized as separate
+    labels in the training loop.
     """
 
     if device is None:
