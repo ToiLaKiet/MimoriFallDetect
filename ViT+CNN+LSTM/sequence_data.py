@@ -469,7 +469,7 @@ def split_count(total: int, fraction: float) -> int:
     return max(1, int(round(total * fraction)))
 
 
-def split_trial_sequence_items(
+def split_trial_sequence_groups(
     groups: list[tuple[str, list[SequenceItem]]],
     val_split: float,
     test_split: float,
