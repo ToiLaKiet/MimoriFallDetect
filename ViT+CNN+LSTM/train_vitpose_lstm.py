@@ -64,7 +64,7 @@ def choose_device(requested: str) -> torch.device:
 
 def build_model(args: argparse.Namespace) -> SkeletonImageLSTMClassifier:
     """Create the CNN+LSTM classifier using model hyperparameters from CLI args."""
-
+    
     return SkeletonImageLSTMClassifier(
         sequence_length=args.sequence_length,
         embedding_dim=args.embedding_dim,

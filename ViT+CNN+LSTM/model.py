@@ -14,11 +14,11 @@ class SkeletonFrameEncoder(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            # nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            # nn.BatchNorm2d(64),
+            # nn.ReLU(inplace=True),
+            # nn.MaxPool2d(2),
+            nn.Conv2d(32, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d((1, 1)),
@@ -82,6 +82,7 @@ class SkeletonImageLSTMClassifier(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(lstm_output_dim, num_classes),
         )
+        print(f"Initialized SkeletonImageLSTMClassifier with {sum(p.numel() for p in self.parameters())} parameters.")
 
     def forward(self, x):
         if x.ndim != 5: #ndim returns the number of dimensions of the input tensor x. In this case, we expect x to have 5 dimensions: (batch_size, sequence_length, channels, height, width). If x does not have 5 dimensions, it means the input shape is incorrect for our model, and we raise a ValueError with a message indicating the expected shape.
