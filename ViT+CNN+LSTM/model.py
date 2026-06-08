@@ -10,15 +10,15 @@ class SkeletonFrameEncoder(nn.Module):
     def __init__(self, in_channels=3, embedding_dim=128):
         super().__init__()
         self.cnn = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
+            # nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+            # nn.BatchNorm2d(32),
+            # nn.ReLU(inplace=True),
+            # nn.MaxPool2d(2),
             # nn.Conv2d(32, 64, kernel_size=3, padding=1),
             # nn.BatchNorm2d(64),
             # nn.ReLU(inplace=True),
             # nn.MaxPool2d(2),
-            nn.Conv2d(32, 128, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels, 128, kernel_size=3, padding=1), # size of feature maps is (128, 112, 112) after this layer
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d((1, 1)),
