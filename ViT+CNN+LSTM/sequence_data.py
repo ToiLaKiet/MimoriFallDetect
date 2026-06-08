@@ -469,16 +469,22 @@ def split_count(total: int, fraction: float) -> int:
     return max(1, int(round(total * fraction)))
 
 
-def split_trial_sequence_groups(
+def split_trial_sequence_items(
     groups: list[tuple[str, list[SequenceItem]]],
     val_split: float,
     test_split: float,
     seed: int,
 ) -> tuple[list[SequenceItem], list[SequenceItem], list[SequenceItem]]:
-    """Split whole Trial/Camera groups so windows from one camera stay together."""
-    shuffled = list(groups)
-    random.Random(seed).shuffle(shuffled) # Đảm bảo rằng việc xáo trộn các nhóm Trial là ngẫu nhiên nhưng có thể tái tạo được bằng cách sử dụng seed. Điều này giúp đảm bảo rằng việc phân chia dữ liệu thành train/val/test không bị lệch và có thể được tái tạo trong các lần chạy khác nhau.
-    total = len(shuffled)
+    """Split individual SequenceItem items, not whole Trial/Camera groups."""
+
+    # Lấy tất cả SequenceItem từ mọi group ra 1 list
+    all_sequences = [item for _, group in groups for item in group]
+
+    # Xáo trộn SequenceItem
+    random.Random(seed).shuffle(all_sequences)
+
+    total = len(all_sequences)
+
     test_count = split_count(total, test_split)
     val_count = split_count(total, val_split)
 
@@ -490,13 +496,10 @@ def split_trial_sequence_groups(
         else:
             break
 
-    test_groups = shuffled[:test_count]
-    val_groups = shuffled[test_count : test_count + val_count]
-    train_groups = shuffled[test_count + val_count :]
+    test_sequences = all_sequences[:test_count]
+    val_sequences = all_sequences[test_count : test_count + val_count]
+    train_sequences = all_sequences[test_count + val_count :]
 
-    train_sequences = [item for _, group in train_groups for item in group]
-    val_sequences = [item for _, group in val_groups for item in group]
-    test_sequences = [item for _, group in test_groups for item in group]
     return train_sequences, val_sequences, test_sequences
 
 
