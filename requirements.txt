@@ -10,6 +10,7 @@ safetensors>=0.4
 # Image/video utilities
 opencv-python-headless>=4.8
 matplotlib>=3.7
+tqdm>=4.66
 
 # Dataset crawlers/downloaders
 requests>=2.31

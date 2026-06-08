@@ -69,11 +69,11 @@ class SkeletonImageLSTMClassifier(nn.Module):
         lstm_dropout = dropout if num_layers > 1 else 0.0
         
         self.lstm = nn.LSTM(
-            input_size=embedding_dim,
+            input_size=embedding_dim, 
             hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=lstm_dropout,
+            num_layers=num_layers, # number of stacked LSTM layers. If num_layers=1, there is only one layer. If num_layers>1, the output of each layer is fed as input to the next layer, and dropout is applied between layers (except after the last layer).
+            batch_first=True,  # batch_first=True means the input and output tensors are expected to have the shape (batch, sequence, feature). If False, the expected shape is (sequence, batch, feature).
+            dropout=lstm_dropout, 
             bidirectional=bidirectional,
         )
 
@@ -84,7 +84,7 @@ class SkeletonImageLSTMClassifier(nn.Module):
         )
 
     def forward(self, x):
-        if x.ndim != 5:
+        if x.ndim != 5: #ndim returns the number of dimensions of the input tensor x. In this case, we expect x to have 5 dimensions: (batch_size, sequence_length, channels, height, width). If x does not have 5 dimensions, it means the input shape is incorrect for our model, and we raise a ValueError with a message indicating the expected shape.
             raise ValueError(
                 "Expected x with shape (batch, sequence, channels, height, width)."
             )

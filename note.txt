@@ -1,0 +1,6 @@
+Chú thích:
+prepare_labels.py: dùng để lấy nhãn cho các Timestamp từ file csv 
+model.py : lưu mô hình
+extract_vitpose_skeletons.py: dùng để trích xuất các ảnh skeleton
+manifestcreation.ipynb: tạo ra file manifest- file cần thiết cho việc mapping giữa nhãn và ảnh theo timestamp
+

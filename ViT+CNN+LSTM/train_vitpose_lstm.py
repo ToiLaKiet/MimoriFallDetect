@@ -177,6 +177,7 @@ def run_train(
         device=device,
         grad_clip=args.grad_clip,
         checkpoint_path=args.checkpoint_path if data.val_loader is not None else None,
+        show_progress=not args.no_progress,
     )
 
     args.final_checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -297,6 +298,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--bidirectional", action="store_true")
     parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable per-batch tqdm progress bars during training.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--checkpoint-path",
