@@ -269,6 +269,34 @@ def print_split_class_distribution(data: SequenceDataBundle, num_classes: int) -
     )
 
 
+def print_weighted_sampler_report(data: SequenceDataBundle, args: argparse.Namespace) -> None:
+    """Print the effective class sampling share for the weighted train loader."""
+
+    if not args.weighted_sampler:
+        print("WeightedRandomSampler: disabled.")
+        return
+
+    train_counts = split_class_counter(data.train_sequences)
+    if not train_counts:
+        return
+
+    class_mass = {
+        class_id: count * (count ** (-args.sampler_weight_power))
+        for class_id, count in sorted(train_counts.items())
+    }
+    total_mass = sum(class_mass.values())
+    expected_share = {
+        class_id: round(mass / total_mass, 4)
+        for class_id, mass in class_mass.items()
+    }
+    print(
+        "WeightedRandomSampler: enabled for train loader "
+        f"(replacement=True, num_samples={len(data.train_sequences)}, "
+        f"weight_power={args.sampler_weight_power:g})."
+    )
+    print(f"Expected sampled train share by class: {expected_share}")
+
+
 @torch.no_grad()
 def collect_predictions(
     model: SkeletonImageLSTMClassifier,
@@ -420,7 +448,7 @@ def print_all_classification_reports(
 
     class_ids = class_ids_for_report(data, num_classes)
     split_loaders = (
-        ("train", data.train_loader),
+        ("train", data.train_eval_loader or data.train_loader),
         ("val", data.val_loader),
         ("test", data.test_loader),
     )
@@ -446,6 +474,7 @@ def run_train(
         raise RuntimeError("Train loader is empty; check sequence_data.py dataset creation.")
 
     print_split_class_distribution(data, args.num_classes)
+    print_weighted_sampler_report(data, args)
 
     history = train_model(
         model=model,
@@ -587,6 +616,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--weighted-sampler",
+        dest="weighted_sampler",
+        action="store_true",
+        default=True,
+        help="Use WeightedRandomSampler for the train split. Enabled by default.",
+    )
+    parser.add_argument(
+        "--no-weighted-sampler",
+        dest="weighted_sampler",
+        action="store_false",
+        help="Disable WeightedRandomSampler and use normal train shuffling.",
+    )
+    parser.add_argument(
+        "--sampler-weight-power",
+        type=float,
+        default=1.0,
+        help=(
+            "Exponent for inverse class-frequency sampling. "
+            "1.0 balances classes; 0.5 is a softer sqrt reweighting."
+        ),
+    )
     parser.add_argument("--embedding-dim", type=int, default=128)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=2)
@@ -652,6 +703,8 @@ def main() -> None:
 
     args = parse_args()
     seed_everything(args.seed)
+    if args.sampler_weight_power < 0:
+        raise ValueError("--sampler-weight-power must be non-negative.")
 
     args.sequence_data = args.sequence_data.resolve()
     args.checkpoint_path = args.checkpoint_path.resolve()
@@ -671,6 +724,8 @@ def main() -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
+        weighted_train_sampler=args.mode == "train" and args.weighted_sampler,
+        sampler_weight_power=args.sampler_weight_power,
     )
     report_sequence_data(data)
 

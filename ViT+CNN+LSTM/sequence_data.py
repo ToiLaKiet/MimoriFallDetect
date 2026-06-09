@@ -17,7 +17,7 @@ from urllib.parse import unquote, urlparse
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -64,6 +64,7 @@ class SequenceDataBundle:
     test_dataset: SkeletonSequenceDataset | None
     inference_loader: DataLoader
     train_loader: DataLoader | None
+    train_eval_loader: DataLoader | None
     val_loader: DataLoader | None
     test_loader: DataLoader | None
     source_kind: str
@@ -544,18 +545,52 @@ def make_sequence_loader(
     shuffle: bool,
     num_workers: int,
     pin_memory: bool,
+    weighted_sampler: bool = False,
+    sampler_weight_power: float = 1.0,
 ) -> tuple[SkeletonSequenceDataset, DataLoader]:
     """Create a SkeletonSequenceDataset and matching DataLoader."""
 
     dataset = SkeletonSequenceDataset(sequences, image_size)
+    sampler = None
+    if weighted_sampler:
+        sampler = make_weighted_random_sampler(
+            sequences=sequences,
+            weight_power=sampler_weight_power,
+        )
+        shuffle = False
+
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
     )
     return dataset, loader
+
+
+def make_weighted_random_sampler(
+    sequences: list[SequenceItem],
+    weight_power: float = 1.0,
+) -> WeightedRandomSampler:
+    """Create per-sequence weights from inverse class frequency."""
+
+    if not sequences:
+        raise ValueError("Cannot create a WeightedRandomSampler for an empty split.")
+    if weight_power < 0:
+        raise ValueError("sampler_weight_power must be non-negative.")
+
+    class_counts = Counter(item.label for item in sequences)
+    sample_weights = [
+        class_counts[item.label] ** (-weight_power)
+        for item in sequences
+    ]
+    return WeightedRandomSampler(
+        weights=torch.as_tensor(sample_weights, dtype=torch.double),
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
 
 
 def attach_datasets_and_loaders(
@@ -574,6 +609,8 @@ def attach_datasets_and_loaders(
     missing_labels: Iterable[Path],
     missing_skeletons: Iterable[Path],
     invalid_timestamps: Iterable[str] = (),
+    weighted_train_sampler: bool = False,
+    sampler_weight_power: float = 1.0,
 ) -> SequenceDataBundle:
     """Attach PyTorch Dataset/DataLoader objects to sequence splits."""
 
@@ -588,12 +625,22 @@ def attach_datasets_and_loaders(
 
     train_dataset = None
     train_loader = None
+    train_eval_loader = None
     if train_sequences:
         train_dataset, train_loader = make_sequence_loader(
             sequences=train_sequences,
             image_size=image_size,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=not weighted_train_sampler,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            weighted_sampler=weighted_train_sampler,
+            sampler_weight_power=sampler_weight_power,
+        )
+        train_eval_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=False,
             num_workers=num_workers,
             pin_memory=pin_memory,
         )
@@ -633,6 +680,7 @@ def attach_datasets_and_loaders(
         test_dataset=test_dataset,
         inference_loader=inference_loader,
         train_loader=train_loader,
+        train_eval_loader=train_eval_loader,
         val_loader=val_loader,
         test_loader=test_loader,
         source_kind=source_kind,
@@ -760,6 +808,8 @@ def load_sequence_data(
     batch_size: int,
     num_workers: int,
     pin_memory: bool,
+    weighted_train_sampler: bool = False,
+    sampler_weight_power: float = 1.0,
 ) -> SequenceDataBundle:
     """Load a serialized sequence dataset and recreate Dataset/DataLoader objects."""
 
@@ -790,6 +840,8 @@ def load_sequence_data(
         missing_labels=tuple(Path(path) for path in data.get("missing_labels", [])),
         missing_skeletons=tuple(Path(path) for path in data.get("missing_skeletons", [])),
         invalid_timestamps=tuple(str(value) for value in data.get("invalid_timestamps", [])),
+        weighted_train_sampler=weighted_train_sampler,
+        sampler_weight_power=sampler_weight_power,
     )
 
 
