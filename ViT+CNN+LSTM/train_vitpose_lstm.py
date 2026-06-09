@@ -26,7 +26,7 @@ from sequence_data import (  # noqa: E402
     load_sequence_data,
     parse_image_size,
 )
-from utils import evaluate_model, train_model  # noqa: E402
+from utils import _to_device, _unpack_batch, evaluate_model, train_model  # noqa: E402
 
 
 def seed_everything(seed: int) -> None:
@@ -76,13 +76,70 @@ def build_model(args: argparse.Namespace) -> SkeletonImageLSTMClassifier:
     )
 
 
-def load_state_dict_file(checkpoint_path: Path, device: torch.device) -> dict[str, torch.Tensor]:
-    """Load a model state dict while preferring PyTorch's safer weights-only mode."""
+def load_checkpoint_file(checkpoint_path: Path, device: torch.device) -> object:
+    """Load a checkpoint while preferring PyTorch's safer weights-only mode."""
 
     try:
         return torch.load(checkpoint_path, map_location=device, weights_only=True)
     except TypeError:
         return torch.load(checkpoint_path, map_location=device)
+
+
+def extract_model_state_dict(checkpoint: object) -> dict[str, torch.Tensor]:
+    """Extract model weights from raw state_dict or common checkpoint wrappers."""
+
+    if not isinstance(checkpoint, dict):
+        raise TypeError(f"Checkpoint must be a dict, got {type(checkpoint)!r}")
+
+    model_state_keys = ("model_state_dict", "model_state", "state_dict", "model")
+    for key in model_state_keys:
+        value = checkpoint.get(key)
+        if isinstance(value, dict):
+            checkpoint = value
+            break
+
+    if not all(torch.is_tensor(value) for value in checkpoint.values()):
+        keys = ", ".join(str(key) for key in list(checkpoint.keys())[:8])
+        raise ValueError(
+            "Could not find a model state_dict in checkpoint. "
+            f"Top-level keys: {keys}"
+        )
+
+    state_dict = dict(checkpoint)
+    if state_dict and all(str(key).startswith("module.") for key in state_dict):
+        state_dict = {
+            str(key).removeprefix("module."): value
+            for key, value in state_dict.items()
+        }
+
+    return state_dict
+
+
+def load_state_dict_file(checkpoint_path: Path, device: torch.device) -> dict[str, torch.Tensor]:
+    """Load only model weights from raw or wrapped checkpoints."""
+
+    return extract_model_state_dict(load_checkpoint_file(checkpoint_path, device))
+
+
+def load_model_weights_from_checkpoint(
+    model: SkeletonImageLSTMClassifier,
+    checkpoint_path: Path,
+    device: torch.device,
+    strict: bool = True,
+) -> None:
+    """Load model weights before continuing training."""
+
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+
+    state_dict = load_state_dict_file(checkpoint_path, device)
+    incompatible = model.load_state_dict(state_dict, strict=strict)
+    print(f"Loaded resume checkpoint: {checkpoint_path}")
+    if not strict:
+        if incompatible.missing_keys:
+            print(f"Missing keys while loading resume checkpoint: {incompatible.missing_keys}")
+        if incompatible.unexpected_keys:
+            print(f"Unexpected keys while loading resume checkpoint: {incompatible.unexpected_keys}")
 
 
 def write_history(history: list[dict[str, float]], output_path: Path) -> None:
@@ -129,6 +186,11 @@ def save_metadata(
         "val_sequences": len(val_sequences),
         "test_sequences": len(test_sequences),
         "class_counts": dict(Counter(item.label for item in sequences)),
+        "split_class_counts": {
+            "train": dict(Counter(item.label for item in train_sequences)),
+            "val": dict(Counter(item.label for item in val_sequences)),
+            "test": dict(Counter(item.label for item in test_sequences)),
+        },
     }
     output_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
@@ -155,6 +217,221 @@ def report_sequence_data(data: SequenceDataBundle) -> None:
         print(f"First invalid timestamp rows: {preview}")
 
 
+def class_ids_for_report(data: SequenceDataBundle, num_classes: int) -> list[int]:
+    """Return all configured class ids plus any label id found in the dataset."""
+
+    label_ids = {item.label for item in data.sequences}
+    label_ids.update(range(num_classes))
+    return sorted(label_ids)
+
+
+def split_class_counter(sequences: list[SequenceItem]) -> Counter:
+    """Count sequence labels for one train/val/test split."""
+
+    return Counter(item.label for item in sequences)
+
+
+def print_split_class_distribution(data: SequenceDataBundle, num_classes: int) -> None:
+    """Print how many sequence samples each class has in train/val/test."""
+
+    class_ids = class_ids_for_report(data, num_classes)
+    split_counts = {
+        "train": split_class_counter(data.train_sequences),
+        "val": split_class_counter(data.val_sequences),
+        "test": split_class_counter(data.test_sequences),
+    }
+    split_totals = {
+        "train": len(data.train_sequences),
+        "val": len(data.val_sequences),
+        "test": len(data.test_sequences),
+    }
+
+    print("\nClass distribution by split:")
+    print(f"{'class':>7} {'train':>8} {'val':>8} {'test':>8} {'total':>8}")
+    for class_id in class_ids:
+        train_count = split_counts["train"].get(class_id, 0)
+        val_count = split_counts["val"].get(class_id, 0)
+        test_count = split_counts["test"].get(class_id, 0)
+        total = train_count + val_count + test_count
+        print(
+            f"{class_id:>7} "
+            f"{train_count:>8} "
+            f"{val_count:>8} "
+            f"{test_count:>8} "
+            f"{total:>8}"
+        )
+    print(
+        f"{'total':>7} "
+        f"{split_totals['train']:>8} "
+        f"{split_totals['val']:>8} "
+        f"{split_totals['test']:>8} "
+        f"{sum(split_totals.values()):>8}\n"
+    )
+
+
+@torch.no_grad()
+def collect_predictions(
+    model: SkeletonImageLSTMClassifier,
+    data_loader,
+    device: torch.device,
+) -> tuple[list[int], list[int]]:
+    """Collect true/predicted class ids from one dataloader."""
+
+    model.to(device)
+    model.eval()
+
+    y_true: list[int] = []
+    y_pred: list[int] = []
+    for batch in data_loader:
+        x, y = _unpack_batch(batch)
+        x, y = _to_device(x, y, device)
+        logits = model(x)
+        predicted = logits.argmax(dim=1)
+        y_true.extend(int(value) for value in y.detach().cpu().tolist())
+        y_pred.extend(int(value) for value in predicted.detach().cpu().tolist())
+
+    return y_true, y_pred
+
+
+def classification_report_rows(
+    y_true: list[int],
+    y_pred: list[int],
+    class_ids: list[int],
+) -> tuple[list[dict[str, float]], dict[str, float]]:
+    """Compute per-class precision/recall/F1/support and aggregate metrics."""
+
+    rows = []
+    total_support = len(y_true)
+    total_correct = sum(1 for true, pred in zip(y_true, y_pred) if true == pred)
+
+    for class_id in class_ids:
+        tp = sum(
+            1
+            for true, pred in zip(y_true, y_pred)
+            if true == class_id and pred == class_id
+        )
+        fp = sum(
+            1
+            for true, pred in zip(y_true, y_pred)
+            if true != class_id and pred == class_id
+        )
+        fn = sum(
+            1
+            for true, pred in zip(y_true, y_pred)
+            if true == class_id and pred != class_id
+        )
+        support = sum(1 for true in y_true if true == class_id)
+        precision = tp / (tp + fp) if tp + fp > 0 else 0.0
+        recall = tp / (tp + fn) if tp + fn > 0 else 0.0
+        f1 = (
+            2 * precision * recall / (precision + recall)
+            if precision + recall > 0
+            else 0.0
+        )
+        rows.append(
+            {
+                "class": class_id,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "support": support,
+            }
+        )
+
+    macro_precision = sum(row["precision"] for row in rows) / max(len(rows), 1)
+    macro_recall = sum(row["recall"] for row in rows) / max(len(rows), 1)
+    macro_f1 = sum(row["f1"] for row in rows) / max(len(rows), 1)
+    weighted_precision = sum(row["precision"] * row["support"] for row in rows) / max(
+        total_support, 1
+    )
+    weighted_recall = sum(row["recall"] * row["support"] for row in rows) / max(
+        total_support, 1
+    )
+    weighted_f1 = sum(row["f1"] * row["support"] for row in rows) / max(total_support, 1)
+
+    summary = {
+        "accuracy": total_correct / max(total_support, 1),
+        "macro_precision": macro_precision,
+        "macro_recall": macro_recall,
+        "macro_f1": macro_f1,
+        "weighted_precision": weighted_precision,
+        "weighted_recall": weighted_recall,
+        "weighted_f1": weighted_f1,
+        "support": total_support,
+    }
+    return rows, summary
+
+
+def print_classification_report(
+    split_name: str,
+    y_true: list[int],
+    y_pred: list[int],
+    class_ids: list[int],
+) -> None:
+    """Print a sklearn-style classification report for one split."""
+
+    rows, summary = classification_report_rows(y_true, y_pred, class_ids)
+
+    print(f"\nClassification report [{split_name}]:")
+    print(
+        f"{'class':>12} "
+        f"{'precision':>10} "
+        f"{'recall':>10} "
+        f"{'f1-score':>10} "
+        f"{'support':>10}"
+    )
+    for row in rows:
+        print(
+            f"{int(row['class']):>12} "
+            f"{row['precision']:>10.4f} "
+            f"{row['recall']:>10.4f} "
+            f"{row['f1']:>10.4f} "
+            f"{int(row['support']):>10}"
+        )
+
+    print(
+        f"{'accuracy':>12} {'':>10} {'':>10} "
+        f"{summary['accuracy']:>10.4f} "
+        f"{int(summary['support']):>10}"
+    )
+    print(
+        f"{'macro avg':>12} "
+        f"{summary['macro_precision']:>10.4f} "
+        f"{summary['macro_recall']:>10.4f} "
+        f"{summary['macro_f1']:>10.4f} "
+        f"{int(summary['support']):>10}"
+    )
+    print(
+        f"{'weighted avg':>12} "
+        f"{summary['weighted_precision']:>10.4f} "
+        f"{summary['weighted_recall']:>10.4f} "
+        f"{summary['weighted_f1']:>10.4f} "
+        f"{int(summary['support']):>10}"
+    )
+
+
+def print_all_classification_reports(
+    model: SkeletonImageLSTMClassifier,
+    data: SequenceDataBundle,
+    device: torch.device,
+    num_classes: int,
+) -> None:
+    """Print classification reports for every available split."""
+
+    class_ids = class_ids_for_report(data, num_classes)
+    split_loaders = (
+        ("train", data.train_loader),
+        ("val", data.val_loader),
+        ("test", data.test_loader),
+    )
+
+    for split_name, data_loader in split_loaders:
+        if data_loader is None:
+            continue
+        y_true, y_pred = collect_predictions(model, data_loader, device)
+        print_classification_report(split_name, y_true, y_pred, class_ids)
+
+
 def run_train(
     model: SkeletonImageLSTMClassifier,
     data: SequenceDataBundle,
@@ -167,6 +444,8 @@ def run_train(
         raise RuntimeError("Train split is empty; reduce val-split.")
     if data.train_loader is None:
         raise RuntimeError("Train loader is empty; check sequence_data.py dataset creation.")
+
+    print_split_class_distribution(data, args.num_classes)
 
     history = train_model(
         model=model,
@@ -203,6 +482,22 @@ def run_train(
             f"loss={test_metrics['loss']:.4f} "
             f"accuracy={test_metrics['accuracy']:.4f}"
         )
+
+    report_checkpoint_path = None
+    if data.val_loader is not None and args.checkpoint_path.is_file():
+        report_checkpoint_path = args.checkpoint_path
+    elif args.final_checkpoint_path.is_file():
+        report_checkpoint_path = args.final_checkpoint_path
+    if report_checkpoint_path is not None:
+        model.load_state_dict(load_state_dict_file(report_checkpoint_path, device))
+        print(f"Classification reports checkpoint: {report_checkpoint_path}")
+    print_all_classification_reports(
+        model=model,
+        data=data,
+        device=device,
+        num_classes=args.num_classes,
+    )
+
     print(f"Final checkpoint: {args.final_checkpoint_path}")
     print(f"Training history: {args.history_csv}")
     print(f"Training metadata: {args.metadata_json}")
@@ -317,6 +612,17 @@ def parse_args() -> argparse.Namespace:
         help="Final checkpoint path.",
     )
     parser.add_argument(
+        "--resume-checkpoint",
+        type=Path,
+        default=None,
+        help="Load this checkpoint's model weights before --mode train to continue training.",
+    )
+    parser.add_argument(
+        "--resume-non-strict",
+        action="store_true",
+        help="Allow missing/unexpected keys when loading --resume-checkpoint.",
+    )
+    parser.add_argument(
         "--history-csv",
         type=Path,
         default=SCRIPT_DIR / "checkpoints" / "vitpose_lstm_history.csv",
@@ -350,6 +656,8 @@ def main() -> None:
     args.sequence_data = args.sequence_data.resolve()
     args.checkpoint_path = args.checkpoint_path.resolve()
     args.final_checkpoint_path = args.final_checkpoint_path.resolve()
+    if args.resume_checkpoint is not None:
+        args.resume_checkpoint = args.resume_checkpoint.resolve()
     args.history_csv = args.history_csv.resolve()
     args.metadata_json = args.metadata_json.resolve()
     args.predictions_csv = args.predictions_csv.resolve()
@@ -387,6 +695,13 @@ def main() -> None:
 
     model = build_model(args)
     if args.mode == "train":
+        if args.resume_checkpoint is not None:
+            load_model_weights_from_checkpoint(
+                model=model,
+                checkpoint_path=args.resume_checkpoint,
+                device=device,
+                strict=not args.resume_non_strict,
+            )
         run_train(model, data, args, device)
     else:
         run_inference(model, data, args, device)
