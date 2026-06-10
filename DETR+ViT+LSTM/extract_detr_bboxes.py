@@ -112,6 +112,7 @@ class LargestPersonBBoxExtractor:
         threshold: float,
         allow_download: bool,
         max_side: int,
+        token: str | None = None,
     ) -> None:
         configure_runtime_cache()
 
@@ -123,11 +124,13 @@ class LargestPersonBBoxExtractor:
             model_source,
             local_files_only=not allow_download,
             use_fast=False,
+            token=token
         )
         self.model = (
             RTDetrForObjectDetection.from_pretrained(
                 model_source,
                 local_files_only=not allow_download,
+                token=token
             )
             .to(device)
             .eval()
@@ -240,7 +243,6 @@ def image_rows_without_manifest(
     limit: int,
 ) -> list[tuple[Path, int, str, str]]:
     """Allow smoke testing without labels by assigning label 0."""
-
     rows = []
     for image_path in iter_images(image_dir, limit):
         timestamp = normalize_image_timestamp_strict(image_path.stem) or image_path.stem
@@ -255,7 +257,7 @@ def write_bbox_manifest(records: list[BBoxRecord], output_path: Path) -> None:
     fieldnames = [
         "frame",
         "crop_path",
-        "label",
+        "Label",
         "group_key",
         "timestamp",
         "bbox_x1",
@@ -273,7 +275,7 @@ def write_bbox_manifest(records: list[BBoxRecord], output_path: Path) -> None:
                 {
                     "frame": str(record.frame_path),
                     "crop_path": str(record.crop_path),
-                    "label": record.label,
+                    "Label": record.label,
                     "group_key": record.group_key,
                     "timestamp": record.timestamp,
                     "bbox_x1": f"{x1:.3f}",
@@ -309,6 +311,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite-crops", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=25)
+    parser.add_argument("--token", type=str, default=None, help="Hugging Face token for private models or to increase rate limits")
     return parser.parse_args()
 
 
@@ -342,6 +345,7 @@ def main() -> None:
         threshold=args.det_thr,
         allow_download=args.allow_download,
         max_side=args.max_side,
+        token=args.token
     )
 
     records: list[BBoxRecord] = []
