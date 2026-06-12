@@ -148,7 +148,7 @@ def crop_person_image(
     """Detect largest person in one image, crop it, and save without resizing."""
 
     if output_path.exists() and not overwrite:
-        return "exists"
+        return "existing"
 
     bbox = detect_bbox(
         image=image_path,
@@ -224,6 +224,8 @@ def crop_dataset(
         )
 
         stats["seen"] += 1
+        if status not in stats:
+            raise RuntimeError(f"Unknown crop status: {status}")
         stats[status] += 1
 
         if index == len(image_paths) or index % log_every == 0:
