@@ -116,19 +116,6 @@ def iter_timestamp_images(image_dir: Path, limit: int = 0):
             return
 
 
-def group_images_by_camera(image_dir: Path, limit: int = 0) -> list[tuple[Path, list[Path]]]:
-    """Return sorted timestamp images grouped by Subject/Activity/Trial/Camera."""
-
-    groups: dict[Path, list[Path]] = {}
-    for image_path in iter_timestamp_images(image_dir, limit=limit):
-        groups.setdefault(image_path.parent, []).append(image_path)
-
-    return [
-        (camera_dir, sorted(paths))
-        for camera_dir, paths in sorted(groups.items())
-    ]
-
-
 def clamp_bbox_to_image(
     bbox: tuple[float, float, float, float],
     image_width: int,
@@ -203,74 +190,6 @@ def crop_person_image(
     )
 
 
-def select_tracked_person_bbox(
-    result: Any,
-    target_track_id: int | None,
-) -> tuple[tuple[float, float, float, float] | None, int | None]:
-    """Choose the current target track bbox, falling back to the largest tracked person."""
-    boxes_obj = getattr(result, "boxes", None) # Ultralytics results have a .boxes attribute, but it may be None or empty
-    if boxes_obj is None or len(boxes_obj) == 0: # If there are no detected boxes, we cannot track anyone, so we return None and keep the same target_track_id for the next frame
-        return None, target_track_id # If there are detected boxes, we convert them to numpy arrays for processing. The .xyxy attribute gives us the bounding box coordinates in (x1, y1, x2, y2) format. We also check if there is an .id attribute which contains the track IDs assigned by the tracker. If target_track_id is provided and matches one of the track IDs in this frame, we select that box. Otherwise, we find the largest box by area and select it as the new target track ID for the next frame.
-
-    boxes = boxes_obj.xyxy.detach().cpu().numpy() 
-    ids_tensor = getattr(boxes_obj, "id", None) # The .id attribute may not exist if the tracker did not assign IDs to the boxes, so we use getattr to avoid an AttributeError. If ids_tensor is not None, we convert it to a numpy array of integers for easier processing.
-    track_ids = None # Initialize track_ids to None. If ids_tensor is not None, we will fill track_ids with the corresponding track IDs for each box. If target_track_id is provided and matches one of the track IDs in this frame, we will select that box. Otherwise, we will find the largest box by area and select it as the new target track ID for the next frame.
-    if ids_tensor is not None:
-        track_ids = ids_tensor.detach().cpu().numpy().astype(int)
-    
-    # Nếu target_track_id đã được cung cấp từ trước, thì đoạn code sẽ vào đây và tìm trong track_ids xem có track ID nào trùng với target_track_id không. Nếu có, nó sẽ chọn box tương ứng với track ID đó và trả về box cùng với target_track_id cũ cho lần theo dõi tiếp theo. Nếu không có track ID nào trùng, hoặc nếu target_track_id là None, thì đoạn code sẽ tính diện tích của tất cả các box và chọn box có diện tích lớn nhất làm box được theo dõi hiện tại. Nó cũng sẽ cập nhật target_track_id thành track ID của box lớn nhất này (nếu track_ids không phải là None) để sử dụng cho lần theo dõi tiếp theo.
-    if target_track_id is not None and track_ids is not None:
-        matches = [
-            index
-            for index, track_id in enumerate(track_ids)
-            if track_id == target_track_id
-        ]
-        if matches:
-            box = boxes[matches[0]] 
-            return tuple(float(value) for value in box), target_track_id
-
-    widths = [max(0.0, float(box[2] - box[0])) for box in boxes]
-    heights = [max(0.0, float(box[3] - box[1])) for box in boxes]
-    largest_index = max(range(len(boxes)), key=lambda index: widths[index] * heights[index])
-    if track_ids is not None:
-        target_track_id = int(track_ids[largest_index])
-
-    return tuple(float(value) for value in boxes[largest_index]), target_track_id
-
-
-def track_person_bbox(
-    model,
-    image_path: Path,
-    tracker: str,
-    persist: bool,
-    target_track_id: int | None,
-    conf: float,
-    iou: float,
-    imgsz: ImageSizeArg | None,
-    device: str | int | None,
-) -> tuple[tuple[float, float, float, float] | None, int | None]:
-    """Run Ultralytics tracking on one frame and return the selected person bbox."""
-
-    track_kwargs: dict[str, Any] = {
-        "source": str(image_path),
-        "tracker": tracker,
-        "persist": persist,
-        "classes": [0],
-        "conf": conf,
-        "iou": iou,
-        "verbose": False,
-    }
-    if imgsz is not None:
-        track_kwargs["imgsz"] = imgsz
-    if device is not None:
-        track_kwargs["device"] = device
-
-    results = model.track(**track_kwargs)
-    if not results:
-        return None, target_track_id
-    return select_tracked_person_bbox(results[0], target_track_id)
-
-
 def update_stats(stats: dict[str, int], status: str) -> None:
     stats["seen"] += 1
     if status not in stats:
@@ -298,8 +217,6 @@ def crop_dataset(
     imgsz: ImageSizeArg | None = None,
     device: str | int | None = None,
     overwrite: bool = False,
-    track: bool = False,
-    tracker: str = "bytetrack.yaml",
     limit: int = 0,
     log_every: int = 100,
 ) -> dict[str, int]:
@@ -317,8 +234,6 @@ def crop_dataset(
     )
     print(f"Detector: {detector}")
     print(f"Model: {resolved_model_path}")
-    if track:
-        print(f"Tracking: enabled ({tracker})")
 
     stats = {
         "seen": 0,
@@ -326,41 +241,6 @@ def crop_dataset(
         "existing": 0,
         "missed": 0,
     }
-
-    if track:
-        processed = 0
-        camera_groups = group_images_by_camera(image_dir, limit=limit)
-        total_images = sum(len(paths) for _, paths in camera_groups)
-
-        for _, image_paths_in_camera in camera_groups:
-            target_track_id = None
-            for frame_index, image_path in enumerate(image_paths_in_camera):
-                relative_path = image_path.relative_to(image_dir)
-                output_path = output_dir / relative_path
-                bbox, target_track_id = track_person_bbox(
-                    model=model,
-                    image_path=image_path,
-                    tracker=tracker,
-                    persist=frame_index > 0,
-                    target_track_id=target_track_id,
-                    conf=conf,
-                    iou=iou,
-                    imgsz=imgsz,
-                    device=device,
-                )
-                status = save_crop_from_bbox(
-                    image_path=image_path,
-                    output_path=output_path,
-                    bbox=bbox,
-                    overwrite=overwrite,
-                )
-
-                processed += 1
-                update_stats(stats, status)
-                if processed == total_images or processed % log_every == 0:
-                    print_progress("Track crop", processed, total_images, stats)
-
-        return stats
 
     for index, image_path in enumerate(image_paths, start=1):
         relative_path = image_path.relative_to(image_dir)
@@ -422,19 +302,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", default=None)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument(
-        "--track",
-        action="store_true",
-        help=(
-            "Use Ultralytics tracking with ByteTrack. Tracker is reset for each "
-            "Subject/Activity/Trial/Camera folder."
-        ),
-    )
-    parser.add_argument(
-        "--tracker",
-        default="bytetrack.yaml",
-        help="Ultralytics tracker config. Default: bytetrack.yaml.",
-    )
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=100)
     return parser.parse_args()
@@ -456,8 +323,6 @@ def main() -> None:
         imgsz=args.imgsz,
         device=args.device,
         overwrite=args.overwrite,
-        track=args.track,
-        tracker=args.tracker,
         limit=args.limit,
         log_every=args.log_every,
     )
