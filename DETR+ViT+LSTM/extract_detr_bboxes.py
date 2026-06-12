@@ -17,8 +17,6 @@ from common import (
     SCRIPT_DIR,
     add_old_pipeline_to_path,
     choose_device,
-    configure_runtime_cache,
-    resolve_hf_model_source,
 )
 
 add_old_pipeline_to_path()
@@ -110,27 +108,21 @@ class LargestPersonBBoxExtractor:
         detector_model_name: str,
         device: torch.device,
         threshold: float,
-        allow_download: bool,
         max_side: int,
         token: str | None = None,
     ) -> None:
-        configure_runtime_cache()
-
         from transformers import AutoProcessor, RTDetrForObjectDetection  # noqa: PLC0415
 
-        model_source = resolve_hf_model_source(detector_model_name, allow_download)
-        print(f"Loading detector: {model_source}")
+        print(f"Loading detector: {detector_model_name}")
         self.processor = AutoProcessor.from_pretrained(
-            model_source,
-            local_files_only=not allow_download,
+            detector_model_name,
             use_fast=False,
-            token=token
+            token=token,
         )
         self.model = (
             RTDetrForObjectDetection.from_pretrained(
-                model_source,
-                local_files_only=not allow_download,
-                token=token
+                detector_model_name,
+                token=token,
             )
             .to(device)
             .eval()
@@ -303,7 +295,6 @@ def parse_args() -> argparse.Namespace:
         default=SCRIPT_DIR / "bbox_manifest.csv",
     )
     parser.add_argument("--detector-model", default=DEFAULT_DETECTOR_MODEL)
-    parser.add_argument("--allow-download", action="store_true")
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda", "mps"))
     parser.add_argument("--det-thr", type=float, default=0.3)
     parser.add_argument("--padding-ratio", type=float, default=0.08)
@@ -311,7 +302,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite-crops", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=25)
-    parser.add_argument("--token", type=str, default=None, help="Hugging Face token for private models or to increase rate limits")
+    parser.add_argument(
+        "--token",
+        type=str,
+        default=None,
+        help="Hugging Face token for private models or to increase rate limits",
+    )
     return parser.parse_args()
 
 
@@ -343,9 +339,8 @@ def main() -> None:
         detector_model_name=args.detector_model,
         device=device,
         threshold=args.det_thr,
-        allow_download=args.allow_download,
         max_side=args.max_side,
-        token=args.token
+        token=args.token,
     )
 
     records: list[BBoxRecord] = []

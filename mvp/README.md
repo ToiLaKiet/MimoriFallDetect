@@ -14,6 +14,23 @@ python3 mvp/run_realtime.py
 
 Phím `q` để thoát ở cửa sổ demo.
 
+Mặc định demo chạy `--async-inference`: camera/preview nhắm tới 30 FPS, còn DETR + ViTPose + classifier chạy ở worker riêng và chỉ xử lý frame mới nhất. Status/log sẽ có:
+
+- `FPS`: FPS của preview camera.
+- `infer`: FPS inference thật của model.
+
+Muốn so sánh với vòng lặp đồng bộ cũ:
+
+```bash
+python3 mvp/run_realtime.py --no-async-inference
+```
+
+Muốn đổi FPS camera/preview được yêu cầu:
+
+```bash
+python3 mvp/run_realtime.py --target-fps 30
+```
+
 Mặc định script dùng model detector `PekingU/rtdetr_r50vd_coco_o365` và ViTPose `usyd-community/vitpose-base-simple` đã cache sẵn. Nếu cần cho phép tải model khi máy chưa có cache:
 
 ```bash
@@ -45,6 +62,8 @@ from realtime_core import (
 ```bash
 python3 mvp/run_realtime.py --device cpu
 python3 mvp/run_realtime.py --camera 1
+python3 mvp/run_realtime.py --target-fps 30
+python3 mvp/run_realtime.py --no-async-inference
 python3 mvp/run_realtime.py --det-threshold 0.6
 python3 mvp/run_realtime.py --max-persons 2
 python3 mvp/run_realtime.py --headless
