@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 from pathlib import Path
+from typing import Any, Callable
 
 from PIL import Image
 
@@ -9,6 +11,90 @@ from yolo_inference import DEFAULT_YOLO_MODEL, detect_largest_person_bbox, load_
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+DetectorFn = Callable[..., tuple[float, float, float, float] | None]
+ImageSizeArg = int | tuple[int, int]
+
+
+def parse_imgsz(value: str | None) -> ImageSizeArg | None:
+    """Parse Ultralytics imgsz from 640, 640x480, or 640x480x3."""
+
+    if value is None:
+        return None
+
+    text = str(value).strip().lower()
+    if text in {"", "none", "auto"}:
+        return None
+
+    normalized = text.replace("×", "x").replace(",", "x")
+    if "x" not in normalized:
+        try:
+            imgsz = int(normalized)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid --imgsz value: {value!r}. Use 640, 640x480, or 640x480x3."
+            ) from exc
+        if imgsz <= 0:
+            raise argparse.ArgumentTypeError("--imgsz must be positive.")
+        return imgsz
+
+    parts = [part.strip() for part in normalized.split("x") if part.strip()]
+    if len(parts) not in {2, 3}:
+        raise argparse.ArgumentTypeError(
+            f"Invalid --imgsz value: {value!r}. Use 640, 640x480, or 640x480x3."
+        )
+
+    try:
+        dims = [int(part) for part in parts]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"Invalid --imgsz value: {value!r}. Dimensions must be integers."
+        ) from exc
+
+    if any(dim <= 0 for dim in dims):
+        raise argparse.ArgumentTypeError("--imgsz dimensions must be positive.")
+    if len(dims) == 3 and dims[2] not in {1, 3, 4}:
+        raise argparse.ArgumentTypeError(
+            "--imgsz channel dimension must be 1, 3, or 4 when provided."
+        )
+
+    return dims[0], dims[1]
+
+
+def load_python_file(module_name: str, file_path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load Python module from {file_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_detector_backend(
+    detector: str,
+    model_path: str | Path | None,
+) -> tuple[Any, DetectorFn, str | Path]:
+    """Load one detector backend and return model plus bbox inference function."""
+
+    if detector == "yolo":
+        resolved_model_path = model_path or DEFAULT_YOLO_MODEL
+        return (
+            load_yolo_model(resolved_model_path),
+            detect_largest_person_bbox,
+            resolved_model_path,
+        )
+
+    if detector == "rtdetr-x":
+        backend_path = Path(__file__).with_name("rtdetr-x_inference.py")
+        backend = load_python_file("rtdetr_x_inference", backend_path)
+        resolved_model_path = model_path or backend.DEFAULT_RTDETR_MODEL
+        return (
+            backend.load_rtdetr_model(resolved_model_path),
+            backend.detect_largest_person_bbox,
+            resolved_model_path,
+        )
+
+    raise ValueError(f"Unsupported detector: {detector}")
 
 
 def iter_timestamp_images(image_dir: Path, limit: int = 0):
@@ -52,9 +138,10 @@ def crop_person_image(
     image_path: Path,
     output_path: Path,
     model,
+    detect_bbox: DetectorFn,
     conf: float,
     iou: float,
-    imgsz: int | None,
+    imgsz: ImageSizeArg | None,
     device: str | int | None,
     overwrite: bool,
 ) -> str:
@@ -63,7 +150,7 @@ def crop_person_image(
     if output_path.exists() and not overwrite:
         return "exists"
 
-    bbox = detect_largest_person_bbox(
+    bbox = detect_bbox(
         image=image_path,
         model=model,
         conf=conf,
@@ -88,10 +175,11 @@ def crop_person_image(
 def crop_dataset(
     image_dir: Path,
     output_dir: Path,
-    model_path: str | Path = DEFAULT_YOLO_MODEL,
+    detector: str = "yolo",
+    model_path: str | Path | None = None,
     conf: float = 0.25,
     iou: float = 0.7,
-    imgsz: int | None = None,
+    imgsz: ImageSizeArg | None = None,
     device: str | int | None = None,
     overwrite: bool = False,
     limit: int = 0,
@@ -105,7 +193,12 @@ def crop_dataset(
     if not image_paths:
         return {"seen": 0, "cropped": 0, "existing": 0, "missed": 0}
 
-    model = load_yolo_model(model_path)
+    model, detect_bbox, resolved_model_path = load_detector_backend(
+        detector=detector,
+        model_path=model_path,
+    )
+    print(f"Detector: {detector}")
+    print(f"Model: {resolved_model_path}")
 
     stats = {
         "seen": 0,
@@ -122,6 +215,7 @@ def crop_dataset(
             image_path=image_path,
             output_path=output_path,
             model=model,
+            detect_bbox=detect_bbox,
             conf=conf,
             iou=iou,
             imgsz=imgsz,
@@ -134,7 +228,7 @@ def crop_dataset(
 
         if index == len(image_paths) or index % log_every == 0:
             print(
-                "YOLO crop "
+                "BBox crop "
                 f"{index}/{len(image_paths)} | "
                 f"cropped={stats['cropped']} "
                 f"existing={stats['existing']} "
@@ -147,16 +241,37 @@ def crop_dataset(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Detect person bboxes with YOLO and crop images while preserving "
+            "Detect person bboxes and crop images while preserving "
             "Subject/Activity/Trial/Camera/Timestamp.png structure."
         )
     )
     parser.add_argument("--image-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--model-path", type=Path, default=Path(DEFAULT_YOLO_MODEL))
+    parser.add_argument(
+        "--detector",
+        choices=("yolo", "rtdetr-x"),
+        default="yolo",
+        help="Detection backend. Default: yolo.",
+    )
+    parser.add_argument(
+        "--model-path",
+        default=None,
+        help=(
+            "Model .pt path or Ultralytics model name. Defaults to yolo26x.pt "
+            "for YOLO and rtdetr-x.pt for RT-DETR-X."
+        ),
+    )
     parser.add_argument("--conf", type=float, default=0.5)
     parser.add_argument("--iou", type=float, default=0.7)
-    parser.add_argument("--imgsz", type=int, default=None)
+    parser.add_argument(
+        "--imgsz",
+        type=parse_imgsz,
+        default=None,
+        help=(
+            "Ultralytics inference image size. Accepts 640, 640x480, "
+            "or 640x480x3; channel is ignored."
+        ),
+    )
     parser.add_argument("--device", default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
@@ -173,6 +288,7 @@ def main() -> None:
     stats = crop_dataset(
         image_dir=args.image_dir,
         output_dir=args.output_dir,
+        detector=args.detector,
         model_path=args.model_path,
         conf=args.conf,
         iou=args.iou,
