@@ -352,9 +352,9 @@ def run_sync_loop(
             poses,
             args.keypoint_threshold,
         )
-        model_buffer.append(model_input_frame.copy())
+        model_buffer.append(model_input_frame.copy()) # automatically pop oldest if maxlen exceeded
 
-        frame_count += 1
+        frame_count += 1 # Increment frame count after processing to reflect actual inference count in logs and status.
         fps, last_tick = update_fps(fps, last_tick)
 
         if len(model_buffer) == model_buffer.maxlen and frame_count % args.classify_every == 0:
@@ -369,8 +369,6 @@ def run_sync_loop(
                 f"class={class_index} score={float(score):.2f}"
             )
 
-        if args.save_latest:
-            cv2.imwrite(str(args.output_dir / "latest_skeleton.jpg"), model_input_frame)
 
         if not args.headless:
             demo_frame = draw_demo_frame(
