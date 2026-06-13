@@ -19,6 +19,10 @@ DEFAULT_CAMERA_ROIS: dict[str, CameraRoi] = {
     "Camera1": (6, 115, 595, 479), # x1, y1, x2, y2 for cropping to the area where the person is expected to be in Camera1 views. Adjust as needed based on actual camera setup and field of view.
     "Camera2": (142, 1, 485, 479), # x1, y1, x2, y2 for cropping to the area where the person is expected to be in Camera2 views. Adjust as needed based on actual camera setup and field of view.
 }
+DEFAULT_CAMERA_IMGSZ: dict[str, ImageSizeArg] = {
+    "Camera1": (589, 364),
+    "Camera2": (343, 478),
+}
 
 
 def parse_imgsz(value: str | None) -> ImageSizeArg | None:
@@ -64,6 +68,23 @@ def parse_imgsz(value: str | None) -> ImageSizeArg | None:
         )
 
     return dims[0], dims[1]
+
+
+def parse_camera_imgsz(value: str) -> tuple[str, ImageSizeArg]:
+    if "=" not in value:
+        raise argparse.ArgumentTypeError(
+            "Use CAMERA=IMGSZ, for example Camera1=589x364."
+        )
+
+    camera_name, imgsz_text = value.split("=", 1)
+    camera_name = camera_name.strip()
+    if not camera_name:
+        raise argparse.ArgumentTypeError("Camera name cannot be empty.")
+
+    imgsz = parse_imgsz(imgsz_text.strip())
+    if imgsz is None:
+        raise argparse.ArgumentTypeError("Camera imgsz cannot be none/auto.")
+    return camera_name, imgsz
 
 
 def load_python_file(module_name: str, file_path: Path):
@@ -150,6 +171,38 @@ def roi_from_entry(entry: Any) -> CameraRoi:
     return x1, y1, x2, y2
 
 
+def imgsz_from_entry(entry: Any) -> ImageSizeArg | None:
+    if isinstance(entry, dict):
+        if "imgsz" in entry:
+            return imgsz_from_entry(entry["imgsz"])
+        if all(key in entry for key in ("width", "height")):
+            return int(entry["width"]), int(entry["height"])
+        if "xyxy" in entry:
+            x1, y1, x2, y2 = roi_from_entry(entry["xyxy"])
+            return x2 - x1, y2 - y1
+        if all(key in entry for key in ("x1", "y1", "x2", "y2")):
+            x1, y1, x2, y2 = roi_from_entry(entry)
+            return x2 - x1, y2 - y1
+        if all(key in entry for key in ("x", "y", "width", "height")):
+            return int(entry["width"]), int(entry["height"])
+        raise ValueError(f"Unsupported camera imgsz entry: {entry!r}")
+
+    if isinstance(entry, int):
+        return entry
+    if isinstance(entry, str):
+        return parse_imgsz(entry)
+    if isinstance(entry, (list, tuple)):
+        if len(entry) == 1:
+            return int(entry[0])
+        if len(entry) in {2, 3}:
+            dims = [int(value) for value in entry]
+            if any(dim <= 0 for dim in dims):
+                raise ValueError(f"Invalid camera imgsz entry: {entry!r}")
+            return dims[0], dims[1]
+
+    raise ValueError(f"Unsupported camera imgsz entry: {entry!r}")
+
+
 def load_camera_rois(config_path: Path | None) -> dict[str, CameraRoi]:
     if config_path is None:
         return dict(DEFAULT_CAMERA_ROIS)
@@ -165,6 +218,36 @@ def load_camera_rois(config_path: Path | None) -> dict[str, CameraRoi]:
         str(camera_name): roi_from_entry(entry)
         for camera_name, entry in roi_entries.items()
     }
+
+
+def load_camera_imgszs(
+    config_path: Path | None,
+    overrides: list[tuple[str, ImageSizeArg]] | None,
+) -> dict[str, ImageSizeArg]:
+    camera_imgszs = dict(DEFAULT_CAMERA_IMGSZ)
+
+    if config_path is not None:
+        with config_path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        imgsz_entries = (
+            data.get("imgsz", data.get("rois", data))
+            if isinstance(data, dict)
+            else data
+        )
+        if not isinstance(imgsz_entries, dict):
+            raise ValueError("Camera imgsz config must be a JSON object.")
+
+        camera_imgszs = {}
+        for camera_name, entry in imgsz_entries.items():
+            imgsz = imgsz_from_entry(entry)
+            if imgsz is not None:
+                camera_imgszs[str(camera_name)] = imgsz
+
+    for camera_name, imgsz in overrides or []:
+        camera_imgszs[camera_name] = imgsz
+
+    return camera_imgszs
 
 
 def camera_roi_for_image(
@@ -188,6 +271,29 @@ def camera_roi_for_image(
         for name, roi in camera_rois.items()
     }
     return normalized_rois.get(normalize_camera_name(camera_name))
+
+
+def camera_imgsz_for_image(
+    image_path: Path,
+    image_dir: Path,
+    camera_imgszs: dict[str, ImageSizeArg] | None,
+) -> ImageSizeArg | None:
+    if not camera_imgszs:
+        return None
+
+    relative_parts = image_path.relative_to(image_dir).parts
+    if len(relative_parts) < 4:
+        return None
+
+    camera_name = relative_parts[3]
+    if camera_name in camera_imgszs:
+        return camera_imgszs[camera_name]
+
+    normalized_imgszs = {
+        normalize_camera_name(name): imgsz
+        for name, imgsz in camera_imgszs.items()
+    }
+    return normalized_imgszs.get(normalize_camera_name(camera_name))
 
 
 def clamp_bbox_to_image(
@@ -331,6 +437,7 @@ def crop_dataset(
     device: str | int | None = None,
     overwrite: bool = False,
     camera_rois: dict[str, CameraRoi] | None = None,
+    camera_imgszs: dict[str, ImageSizeArg] | None = None,
     limit: int = 0,
     log_every: int = 100,
 ) -> dict[str, int]:
@@ -350,6 +457,8 @@ def crop_dataset(
     print(f"Model: {resolved_model_path}")
     if camera_rois:
         print(f"Camera ROI: enabled ({len(camera_rois)} camera(s))")
+    if camera_imgszs:
+        print(f"Camera imgsz: enabled ({len(camera_imgszs)} camera(s))")
 
     stats = {
         "seen": 0,
@@ -366,6 +475,14 @@ def crop_dataset(
             image_dir=image_dir,
             camera_rois=camera_rois,
         )
+        image_imgsz = (
+            camera_imgsz_for_image(
+                image_path=image_path,
+                image_dir=image_dir,
+                camera_imgszs=camera_imgszs,
+            )
+            or imgsz
+        )
 
         status = crop_person_image(
             image_path=image_path,
@@ -374,7 +491,7 @@ def crop_dataset(
             detect_bbox=detect_bbox,
             conf=conf,
             iou=iou,
-            imgsz=imgsz,
+            imgsz=image_imgsz,
             device=device,
             overwrite=overwrite,
             roi=roi,
@@ -439,6 +556,31 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable ROI pre-crop before detector inference.",
     )
+    parser.add_argument(
+        "--camera-imgsz-config",
+        type=Path,
+        default=None,
+        help=(
+            "Optional camera imgsz JSON. If omitted, built-in Camera1/Camera2 "
+            "imgsz values are used. ROI JSON is also accepted and converted to "
+            "ROI width x height."
+        ),
+    )
+    parser.add_argument(
+        "--camera-imgsz",
+        action="append",
+        type=parse_camera_imgsz,
+        default=None,
+        help=(
+            "Override one camera imgsz as CAMERA=IMGSZ, e.g. Camera1=589x364. "
+            "Repeat for multiple cameras."
+        ),
+    )
+    parser.add_argument(
+        "--no-camera-imgsz",
+        action="store_true",
+        help="Disable camera-specific imgsz and use only --imgsz/default model size.",
+    )
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=100)
     return parser.parse_args()
@@ -454,6 +596,14 @@ def main() -> None:
         if args.no_camera_roi
         else load_camera_rois(args.camera_roi_config)
     )
+    camera_imgszs = (
+        None
+        if args.no_camera_imgsz
+        else load_camera_imgszs(
+            config_path=args.camera_imgsz_config or args.camera_roi_config,
+            overrides=args.camera_imgsz,
+        )
+    )
 
     stats = crop_dataset(
         image_dir=args.image_dir,
@@ -466,6 +616,7 @@ def main() -> None:
         device=args.device,
         overwrite=args.overwrite,
         camera_rois=camera_rois,
+        camera_imgszs=camera_imgszs,
         limit=args.limit,
         log_every=args.log_every,
     )
