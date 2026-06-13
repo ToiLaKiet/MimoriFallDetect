@@ -5,6 +5,7 @@ import importlib.util
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 from PIL import Image
 
 from yolo_inference import DEFAULT_YOLO_MODEL, detect_largest_person_bbox, load_yolo_model
@@ -13,6 +14,8 @@ from yolo_inference import DEFAULT_YOLO_MODEL, detect_largest_person_bbox, load_
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 DetectorFn = Callable[..., tuple[float, float, float, float] | None]
 ImageSizeArg = int | tuple[int, int]
+FeatureVector = np.ndarray
+ReIDImageSizeArg = tuple[int, int]
 
 
 def parse_imgsz(value: str | None) -> ImageSizeArg | None:
@@ -58,6 +61,28 @@ def parse_imgsz(value: str | None) -> ImageSizeArg | None:
         )
 
     return dims[0], dims[1]
+
+
+def parse_reid_imgsz(value: str) -> ReIDImageSizeArg:
+    """Parse Torchreid image size as height x width, e.g. 256x128."""
+
+    text = str(value).strip().lower().replace("×", "x").replace(",", "x")
+    parts = [part.strip() for part in text.split("x") if part.strip()]
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError(
+            f"Invalid --reid-imgsz value: {value!r}. Use height x width, e.g. 256x128."
+        )
+
+    try:
+        height, width = (int(part) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"Invalid --reid-imgsz value: {value!r}. Dimensions must be integers."
+        ) from exc
+
+    if height <= 0 or width <= 0:
+        raise argparse.ArgumentTypeError("--reid-imgsz dimensions must be positive.")
+    return height, width
 
 
 def load_python_file(module_name: str, file_path: Path):
@@ -116,16 +141,31 @@ def iter_timestamp_images(image_dir: Path, limit: int = 0):
             return
 
 
-def group_images_by_camera(image_dir: Path, limit: int = 0) -> list[tuple[Path, list[Path]]]:
-    """Return sorted timestamp images grouped by Subject/Activity/Trial/Camera."""
+def group_images_by_subject_activity(
+    image_dir: Path,
+    limit: int = 0,
+) -> list[tuple[Path, list[tuple[Path, list[Path]]]]]:
+    """Return timestamp images grouped by Subject/Activity, then Trial/Camera."""
 
-    groups: dict[Path, list[Path]] = {}
+    groups: dict[Path, dict[Path, list[Path]]] = {}
     for image_path in iter_timestamp_images(image_dir, limit=limit):
-        groups.setdefault(image_path.parent, []).append(image_path)
+        relative_parts = image_path.relative_to(image_dir).parts
+        subject_activity_dir = image_dir / relative_parts[0] / relative_parts[1]
+        camera_dir = image_path.parent
+        groups.setdefault(subject_activity_dir, {}).setdefault(
+            camera_dir,
+            [],
+        ).append(image_path)
 
     return [
-        (camera_dir, sorted(paths))
-        for camera_dir, paths in sorted(groups.items())
+        (
+            subject_activity_dir,
+            [
+                (camera_dir, sorted(paths))
+                for camera_dir, paths in sorted(camera_groups.items())
+            ],
+        )
+        for subject_activity_dir, camera_groups in sorted(groups.items())
     ]
 
 
@@ -203,8 +243,165 @@ def crop_person_image(
     )
 
 
+def bbox_area(bbox: tuple[float, float, float, float] | np.ndarray) -> float:
+    x1, y1, x2, y2 = bbox
+    return max(0.0, float(x2 - x1)) * max(0.0, float(y2 - y1))
+
+
+def resolve_reid_device(
+    reid_device: str | None,
+    detector_device: str | int | None,
+) -> str:
+    """Resolve a Torch device string for Torchreid."""
+
+    if reid_device:
+        device_text = str(reid_device)
+    elif detector_device is not None:
+        device_text = str(detector_device)
+    else:
+        try:
+            import torch
+        except ImportError:
+            return "cpu"
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+    if device_text.isdigit():
+        return f"cuda:{device_text}"
+    return device_text
+
+
+class ReIDFeatureExtractor:
+    """Thin wrapper around Torchreid FeatureExtractor for person bbox crops."""
+
+    def __init__(
+        self,
+        model_name: str,
+        model_path: str | Path | None,
+        device: str,
+        image_size: ReIDImageSizeArg,
+    ) -> None:
+        try:
+            from torchreid.utils import FeatureExtractor
+        except ImportError as exc:
+            raise ImportError(
+                "Torchreid is required for OSNet ReID features. Install "
+                "deep-person-reid/torchreid, then rerun with --track."
+            ) from exc
+
+        resolved_model_path = "" if model_path is None else str(model_path)
+        self.extractor = FeatureExtractor(
+            model_name=model_name,
+            model_path=resolved_model_path,
+            image_size=image_size,
+            device=device,
+            verbose=False,
+        )
+        self.model_name = model_name
+        self.model_path = resolved_model_path or "torchreid-pretrained"
+        self.device = device
+        self.image_size = image_size
+
+    def extract(
+        self,
+        image_path: Path,
+        bbox: tuple[float, float, float, float] | np.ndarray,
+    ) -> FeatureVector | None:
+        with Image.open(image_path) as image_file:
+            image = image_file.convert("RGB")
+            crop_box = clamp_bbox_to_image(
+                tuple(float(value) for value in bbox),
+                image.width,
+                image.height,
+            )
+            if crop_box is None:
+                return None
+
+            crop = image.crop(crop_box)
+
+        crop_array = np.asarray(crop, dtype=np.uint8)
+        feature_tensor = self.extractor(crop_array)
+        feature = feature_tensor.detach().cpu().numpy()[0].astype(np.float32)
+        norm = float(np.linalg.norm(feature))
+        if norm <= 0.0:
+            return None
+        return feature / norm
+
+
+def extract_bbox_feature(
+    image_path: Path,
+    bbox: tuple[float, float, float, float] | np.ndarray,
+    reid_extractor: ReIDFeatureExtractor,
+) -> FeatureVector | None:
+    """Extract an OSNet/Torchreid embedding from one person bbox crop."""
+
+    return reid_extractor.extract(image_path=image_path, bbox=bbox)
+
+
+def feature_similarity(
+    feature_a: FeatureVector | None,
+    feature_b: FeatureVector | None,
+) -> float:
+    if feature_a is None or feature_b is None:
+        return float("-inf")
+    return float(np.dot(feature_a, feature_b))
+
+
+def update_reference_feature(
+    reference_feature: FeatureVector | None,
+    selected_feature: FeatureVector | None,
+) -> FeatureVector | None:
+    if selected_feature is None:
+        return reference_feature
+    if reference_feature is None:
+        return selected_feature
+
+    updated_feature = 0.9 * reference_feature + 0.1 * selected_feature
+    norm = float(np.linalg.norm(updated_feature))
+    if norm <= 0.0:
+        return reference_feature
+    return updated_feature / norm
+
+
+def select_initial_track_index(
+    image_path: Path,
+    boxes: np.ndarray,
+    reference_feature: FeatureVector | None,
+    reid_extractor: ReIDFeatureExtractor,
+) -> tuple[int, FeatureVector | None]:
+    """Choose a local track for a new Trial/Camera sequence."""
+
+    if reference_feature is None:
+        largest_index = max(range(len(boxes)), key=lambda index: bbox_area(boxes[index]))
+        return largest_index, extract_bbox_feature(
+            image_path,
+            boxes[largest_index],
+            reid_extractor,
+        )
+
+    best_index = None
+    best_feature = None
+    best_similarity = float("-inf")
+    for index, box in enumerate(boxes):
+        candidate_feature = extract_bbox_feature(image_path, box, reid_extractor)
+        similarity = feature_similarity(reference_feature, candidate_feature)
+        if similarity > best_similarity:
+            best_index = index
+            best_feature = candidate_feature
+            best_similarity = similarity
+
+    if best_index is not None:
+        return best_index, best_feature
+
+    largest_index = max(range(len(boxes)), key=lambda index: bbox_area(boxes[index]))
+    return largest_index, extract_bbox_feature(
+        image_path,
+        boxes[largest_index],
+        reid_extractor,
+    )
+
+
 def reset_model_trackers(model) -> None:
-    """Reset Ultralytics tracker state before starting a new camera sequence."""
+    """Reset Ultralytics tracker state before a new Trial/Camera sequence."""
 
     predictor = getattr(model, "predictor", None)
     if predictor is None:
@@ -220,32 +417,39 @@ def reset_model_trackers(model) -> None:
         predictor.vid_path = [None] * max(1, len(trackers))
 
 
-def get_track_ids(boxes_obj: Any) -> list[int]:
-    """Return tracker IDs for boxes, with deterministic fallback IDs if missing."""
+def get_track_ids(boxes_obj: Any) -> list[int] | None:
+    """Return real tracker IDs for boxes when Ultralytics provides them."""
 
     ids_tensor = getattr(boxes_obj, "id", None)
     if ids_tensor is None:
-        return list(range(1, len(boxes_obj) + 1))
+        return None
 
     track_ids = ids_tensor.detach().cpu().numpy().astype(int).tolist()
     if len(track_ids) != len(boxes_obj):
-        return list(range(1, len(boxes_obj) + 1))
+        return None
     return [int(track_id) for track_id in track_ids]
 
 
 def select_tracked_person_bbox(
     result: Any,
     target_track_id: int | None,
-) -> tuple[tuple[float, float, float, float] | None, int | None]:
-    """Choose the current target track bbox, falling back to the largest tracked person."""
+    image_path: Path,
+    reference_feature: FeatureVector | None,
+    reid_extractor: ReIDFeatureExtractor,
+) -> tuple[tuple[float, float, float, float] | None, int | None, FeatureVector | None]:
+    """Choose the target track bbox for one Trial/Camera sequence."""
+
     boxes_obj = getattr(result, "boxes", None)
     if boxes_obj is None or len(boxes_obj) == 0:
-        return None, target_track_id
+        return None, target_track_id, None
 
     boxes = boxes_obj.xyxy.detach().cpu().numpy()
     track_ids = get_track_ids(boxes_obj)
+    if track_ids is None:
+        return None, target_track_id, None
 
     if target_track_id is not None:
+        # Giả định rằng có nhiều bounding box định vị. Nếu track_ids không có target_track_id, thì sẽ trả về None.
         matches = [
             index
             for index, track_id in enumerate(track_ids)
@@ -253,14 +457,20 @@ def select_tracked_person_bbox(
         ]
         if matches:
             box = boxes[matches[0]] 
-            return tuple(float(value) for value in box), target_track_id
+            selected_feature = extract_bbox_feature(image_path, box, reid_extractor)
+            return tuple(float(value) for value in box), target_track_id, selected_feature
+        return None, target_track_id, None
 
-    widths = [max(0.0, float(box[2] - box[0])) for box in boxes]
-    heights = [max(0.0, float(box[3] - box[1])) for box in boxes]
-    largest_index = max(range(len(boxes)), key=lambda index: widths[index] * heights[index])
-    target_track_id = int(track_ids[largest_index])
+    selected_index, selected_feature = select_initial_track_index(
+        image_path=image_path,
+        boxes=boxes,
+        reference_feature=reference_feature,
+        reid_extractor=reid_extractor,
+    )
+    
+    target_track_id = int(track_ids[selected_index])
 
-    return tuple(float(value) for value in boxes[largest_index]), target_track_id
+    return tuple(float(value) for value in boxes[selected_index]), target_track_id, selected_feature
 
 
 def track_person_bbox(
@@ -269,11 +479,13 @@ def track_person_bbox(
     tracker: str,
     persist: bool,
     target_track_id: int | None,
+    reference_feature: FeatureVector | None,
+    reid_extractor: ReIDFeatureExtractor,
     conf: float,
     iou: float,
     imgsz: ImageSizeArg | None,
     device: str | int | None,
-) -> tuple[tuple[float, float, float, float] | None, int | None]:
+) -> tuple[tuple[float, float, float, float] | None, int | None, FeatureVector | None]:
     """Run Ultralytics tracking on one frame and return the selected person bbox."""
 
     track_kwargs: dict[str, Any] = {
@@ -292,8 +504,14 @@ def track_person_bbox(
 
     results = model.track(**track_kwargs)
     if not results:
-        return None, target_track_id
-    return select_tracked_person_bbox(results[0], target_track_id)
+        return None, target_track_id, None
+    return select_tracked_person_bbox(
+        result=results[0],
+        target_track_id=target_track_id,
+        image_path=image_path,
+        reference_feature=reference_feature,
+        reid_extractor=reid_extractor,
+    )
 
 
 def update_stats(stats: dict[str, int], status: str) -> None:
@@ -325,6 +543,10 @@ def crop_dataset(
     overwrite: bool = False,
     track: bool = False,
     tracker: str = "bytetrack.yaml",
+    reid_model_name: str = "osnet_x1_0",
+    reid_model_path: str | Path | None = None,
+    reid_device: str | None = None,
+    reid_imgsz: ReIDImageSizeArg = (256, 128),
     limit: int = 0,
     log_every: int = 100,
 ) -> dict[str, int]:
@@ -344,6 +566,25 @@ def crop_dataset(
     print(f"Model: {resolved_model_path}")
     if track:
         print(f"Tracking: enabled ({tracker})")
+        resolved_reid_device = resolve_reid_device(
+            reid_device=reid_device,
+            detector_device=device,
+        )
+        reid_extractor = ReIDFeatureExtractor(
+            model_name=reid_model_name,
+            model_path=reid_model_path,
+            device=resolved_reid_device,
+            image_size=reid_imgsz,
+        )
+        print(
+            "ReID: "
+            f"{reid_extractor.model_name} "
+            f"({reid_extractor.model_path}, "
+            f"device={reid_extractor.device}, "
+            f"imgsz={reid_extractor.image_size[0]}x{reid_extractor.image_size[1]})"
+        )
+    else:
+        reid_extractor = None
 
     stats = {
         "seen": 0,
@@ -354,40 +595,62 @@ def crop_dataset(
 
     if track:
         processed = 0
-        camera_groups = group_images_by_camera(image_dir, limit=limit)
-        total_images = sum(len(paths) for _, paths in camera_groups)
+        subject_activity_groups = group_images_by_subject_activity(
+            image_dir,
+            limit=limit,
+        )
+        total_images = sum(
+            len(paths)
+            for _, camera_groups in subject_activity_groups
+            for _, paths in camera_groups
+        )
 
-        for group, image_paths_in_camera in camera_groups:
-            reset_model_trackers(model)
-            target_track_id = None
-            for image_path in image_paths_in_camera:
-                relative_path = image_path.relative_to(image_dir)
-                output_path = output_dir / relative_path
-                if target_track_id is not None:
-                    print(f'Processing {group} with tracking {target_track_id}', end=' ')
+        for subject_activity_dir, camera_groups in subject_activity_groups:
+            subject_reference_feature = None
+            relative_subject_activity = subject_activity_dir.relative_to(image_dir)
+
+            for _camera_dir, image_paths_in_camera in camera_groups:
+                reset_model_trackers(model)
+                target_track_id = None
                 
-                bbox, target_track_id = track_person_bbox(
-                    model=model,
-                    image_path=image_path,
-                    tracker=tracker,
-                    persist=True,
-                    target_track_id=target_track_id,
-                    conf=conf,
-                    iou=iou,
-                    imgsz=imgsz,
-                    device=device,
-                )
-                status = save_crop_from_bbox(
-                    image_path=image_path,
-                    output_path=output_path,
-                    bbox=bbox,
-                    overwrite=overwrite,
-                )
+                for image_path in image_paths_in_camera:
+                    relative_path = image_path.relative_to(image_dir)
+                    output_path = output_dir / relative_path
 
-                processed += 1
-                update_stats(stats, status)
-                if processed == total_images or processed % log_every == 0:
-                    print_progress("Track crop", processed, total_images, stats)
+                    bbox, target_track_id, selected_feature = track_person_bbox(
+                        model=model,
+                        image_path=image_path,
+                        tracker=tracker,
+                        persist=True,
+                        target_track_id=target_track_id,
+                        reference_feature=subject_reference_feature,
+                        reid_extractor=reid_extractor,
+                        conf=conf,
+                        iou=iou,
+                        imgsz=imgsz,
+                        device=device,
+                    )
+                    subject_reference_feature = update_reference_feature(
+                        subject_reference_feature,
+                        selected_feature,
+                    )
+
+                    status = save_crop_from_bbox(
+                        image_path=image_path,
+                        output_path=output_path,
+                        bbox=bbox,
+                        overwrite=overwrite,
+                    )
+
+                    processed += 1
+                    update_stats(stats, status)
+                    if processed == total_images or processed % log_every == 0:
+                        print_progress(
+                            f"Track crop {relative_subject_activity}",
+                            processed,
+                            total_images,
+                            stats,
+                        )
 
         return stats
 
@@ -455,14 +718,41 @@ def parse_args() -> argparse.Namespace:
         "--track",
         action="store_true",
         help=(
-            "Use Ultralytics tracking with ByteTrack. Tracker is reset for each "
-            "Subject/Activity/Trial/Camera folder."
+            "Use Ultralytics tracking with ByteTrack. Target reference is shared "
+            "per Subject/Activity; tracker state is reset for each Trial/Camera."
         ),
     )
     parser.add_argument(
         "--tracker",
         default="bytetrack.yaml",
         help="Ultralytics tracker config. Default: bytetrack.yaml.",
+    )
+    parser.add_argument(
+        "--reid-model-name",
+        default="osnet_x1_0",
+        help="Torchreid model name for OSNet embeddings. Default: osnet_x1_0.",
+    )
+    parser.add_argument(
+        "--reid-model-path",
+        default=None,
+        help=(
+            "Optional Torchreid model weights path. If omitted, Torchreid uses "
+            "its pretrained model loading behavior."
+        ),
+    )
+    parser.add_argument(
+        "--reid-device",
+        default=None,
+        help=(
+            "Torchreid device, e.g. cuda, cuda:0, or cpu. Defaults to --device "
+            "when provided, otherwise auto-detects CUDA."
+        ),
+    )
+    parser.add_argument(
+        "--reid-imgsz",
+        type=parse_reid_imgsz,
+        default=(256, 128),
+        help="Torchreid input size as height x width. Default: 256x128.",
     )
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=100)
@@ -487,6 +777,10 @@ def main() -> None:
         overwrite=args.overwrite,
         track=args.track,
         tracker=args.tracker,
+        reid_model_name=args.reid_model_name,
+        reid_model_path=args.reid_model_path,
+        reid_device=args.reid_device,
+        reid_imgsz=args.reid_imgsz,
         limit=args.limit,
         log_every=args.log_every,
     )
