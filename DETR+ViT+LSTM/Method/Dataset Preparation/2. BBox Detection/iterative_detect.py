@@ -203,30 +203,49 @@ def crop_person_image(
     )
 
 
+def reset_model_trackers(model) -> None:
+    """Reset Ultralytics tracker state before starting a new camera sequence."""
+
+    predictor = getattr(model, "predictor", None)
+    if predictor is None:
+        return
+
+    trackers = getattr(predictor, "trackers", None) or []
+    for tracker in trackers:
+        reset = getattr(tracker, "reset", None)
+        if callable(reset):
+            reset()
+
+    if hasattr(predictor, "vid_path"):
+        predictor.vid_path = [None] * max(1, len(trackers))
+
+
+def get_track_ids(boxes_obj: Any) -> list[int]:
+    """Return tracker IDs for boxes, with deterministic fallback IDs if missing."""
+
+    ids_tensor = getattr(boxes_obj, "id", None)
+    if ids_tensor is None:
+        return list(range(1, len(boxes_obj) + 1))
+
+    track_ids = ids_tensor.detach().cpu().numpy().astype(int).tolist()
+    if len(track_ids) != len(boxes_obj):
+        return list(range(1, len(boxes_obj) + 1))
+    return [int(track_id) for track_id in track_ids]
+
+
 def select_tracked_person_bbox(
     result: Any,
     target_track_id: int | None,
 ) -> tuple[tuple[float, float, float, float] | None, int | None]:
     """Choose the current target track bbox, falling back to the largest tracked person."""
-    # Nếu như mà không có định vị được box nào thì trả về None và target_track_id để qua bức ảnh kế tiếp
     boxes_obj = getattr(result, "boxes", None)
     if boxes_obj is None or len(boxes_obj) == 0:
-        return None, target_track_id 
-    
-    # Chuyển cái boxes tìm được đó về dạng numpy
-    boxes = boxes_obj.xyxy.detach().cpu().numpy() 
-    # Lấy track_ids là id của các bounding box định vị được.
-    # Cơ chế sắp xếp boxes của Ultralytics Tracker sẽ đảm bảo rằng track_ids[i] sẽ là ID của boxes[i]. Tuy nhiên, không phải lúc nào tracker cũng sẽ gán ID cho tất cả các box, đặc biệt là trong khung hình đầu tiên khi tracker mới bắt đầu theo dõi. Do đó, chúng ta sử dụng getattr để lấy thuộc tính .id của boxes_obj nếu nó tồn tại, và nếu không tồn tại thì ids_tensor sẽ là None. Nếu ids_tensor không phải là None, chúng ta sẽ chuyển nó về numpy array để dễ dàng xử lý sau này.
-    
-    ids_tensor = getattr(boxes_obj, "id", None) # The .id attribute may not exist if the tracker did not assign IDs to the boxes, so we use getattr to avoid an AttributeError. If ids_tensor is not None, we convert it to a numpy array of integers for easier processing.
-    # Nếu có tồn tại ids_tensor thì chuyển nó về numpy array, còn nếu không có thì track_ids sẽ là None. Sau đó, nếu target_track_id đã được cung cấp từ trước, chúng ta sẽ tìm trong track_ids xem có track ID nào trùng với target_track_id không. Nếu có, chúng ta sẽ chọn box tương ứng với track ID đó và trả về box cùng với target_track_id cũ cho lần theo dõi tiếp theo. Nếu không có track ID nào trùng, hoặc nếu target_track_id là None, thì chúng ta sẽ tính diện tích của tất cả các box và chọn box có diện tích lớn nhất làm box được theo dõi hiện tại. Chúng ta cũng sẽ cập nhật target_track_id thành track ID của box lớn nhất này (nếu track_ids không phải là None) để sử dụng cho lần theo dõi tiếp theo.
-    
-    track_ids = None
-    if ids_tensor is not None:
-        track_ids = ids_tensor.detach().cpu().numpy().astype(int)
-    
-    # Nếu target_track_id đã được cung cấp từ trước, thì đoạn code sẽ vào đây và tìm trong track_ids xem có track ID nào trùng với target_track_id không. Nếu có, nó sẽ chọn box tương ứng với track ID đó và trả về box cùng với target_track_id cũ cho lần theo dõi tiếp theo. Nếu không có track ID nào trùng, hoặc nếu target_track_id là None, thì đoạn code sẽ tính diện tích của tất cả các box và chọn box có diện tích lớn nhất làm box được theo dõi hiện tại. Nó cũng sẽ cập nhật target_track_id thành track ID của box lớn nhất này (nếu track_ids không phải là None) để sử dụng cho lần theo dõi tiếp theo.
-    if target_track_id is not None and track_ids is not None:
+        return None, target_track_id
+
+    boxes = boxes_obj.xyxy.detach().cpu().numpy()
+    track_ids = get_track_ids(boxes_obj)
+
+    if target_track_id is not None:
         matches = [
             index
             for index, track_id in enumerate(track_ids)
@@ -239,8 +258,7 @@ def select_tracked_person_bbox(
     widths = [max(0.0, float(box[2] - box[0])) for box in boxes]
     heights = [max(0.0, float(box[3] - box[1])) for box in boxes]
     largest_index = max(range(len(boxes)), key=lambda index: widths[index] * heights[index])
-    if track_ids is not None:
-        target_track_id = int(track_ids[largest_index])
+    target_track_id = int(track_ids[largest_index])
 
     return tuple(float(value) for value in boxes[largest_index]), target_track_id
 
@@ -340,8 +358,9 @@ def crop_dataset(
         total_images = sum(len(paths) for _, paths in camera_groups)
 
         for group, image_paths_in_camera in camera_groups:
+            reset_model_trackers(model)
             target_track_id = None
-            for frame_index, image_path in enumerate(image_paths_in_camera):
+            for image_path in image_paths_in_camera:
                 relative_path = image_path.relative_to(image_dir)
                 output_path = output_dir / relative_path
                 if target_track_id is not None:
@@ -351,7 +370,7 @@ def crop_dataset(
                     model=model,
                     image_path=image_path,
                     tracker=tracker,
-                    persist=frame_index > 0,
+                    persist=True,
                     target_track_id=target_track_id,
                     conf=conf,
                     iou=iou,
