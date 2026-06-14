@@ -15,12 +15,12 @@ DetectorFn = Callable[..., tuple[float, float, float, float] | None]
 ImageSizeArg = int | tuple[int, int]
 CameraRoi = tuple[int, int, int, int]
 DEFAULT_CAMERA_ROIS: dict[str, CameraRoi] = {
-    "Camera1": (6, 115, 595, 479),
-    "Camera2": (142, 1, 485, 479),
+    "Camera1": (0, 0, 640, 480),
+    "Camera2": (3, 2, 591, 479),
 }
 DEFAULT_CAMERA_IMGSZ: dict[str, ImageSizeArg] = {
     "Camera1": (384, 608),  # height, width
-    "Camera2": (480, 352)  # height, width
+    "Camera2": (480, 608),  # height, width
 }
 
 
