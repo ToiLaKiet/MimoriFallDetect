@@ -256,13 +256,14 @@ def update_stats(stats: dict[str, int], status: str) -> None:
     stats[status] += 1
 
 
-def print_progress(prefix: str, index: int, total: int, stats: dict[str, int]) -> None:
+def print_progress(prefix: str, index: int, total: int, stats: dict[str, int], relative_path: Path) -> None:
     print(
         f"{prefix} "
         f"{index}/{total} | "
         f"cropped={stats['cropped']} "
         f"existing={stats['existing']} "
         f"missed={stats['missed']}"
+        f" | {relative_path}"
     )
 
 
@@ -330,7 +331,7 @@ def crop_dataset(
         update_stats(stats, status)
 
         if index == len(image_paths) or index % log_every == 0:
-            print_progress("BBox crop", index, len(image_paths), stats)
+            print_progress("BBox crop", index, len(image_paths), stats, relative_path)
 
     return stats
 
