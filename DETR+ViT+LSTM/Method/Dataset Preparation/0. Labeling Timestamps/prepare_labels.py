@@ -12,6 +12,7 @@ OUTPUT_FIELDNAMES = [
     "Subject",
     "Activity",
     "Trial",
+    "Tag",
     "Label"
 ]
 
@@ -71,7 +72,7 @@ def iter_timestamp_labels(input_csv_path):
             subject = parse_int(row[-4], "Subject", source_line)
             activity = parse_int(row[-3], "Activity", source_line)
             trial = parse_int(row[-2], "Trial", source_line)
-            class_id_1_based = parse_int(row[-3], "Activity", source_line)
+            tag = parse_int(row[-1], "Tag", source_line)
 
             # yield là từ khóa tạo generator, cho phép hàm trả về một giá trị và tạm dừng trạng thái của nó, sau đó tiếp tục từ điểm đó khi được gọi lại. Điều này rất hữu ích để xử lý dữ liệu lớn hoặc luồng dữ liệu mà không cần tải tất cả vào bộ nhớ cùng một lúc.
             yield {
@@ -79,8 +80,8 @@ def iter_timestamp_labels(input_csv_path):
                 "Subject": subject,
                 "Activity": activity,
                 "Trial": trial,
-                "class_id_1_based": class_id_1_based,
-                "Label": class_id_1_based - 1,
+                "Tag": tag,
+                "Label": tag,
                 "Row_Index": row_index,
             }
 
@@ -100,8 +101,9 @@ def prepare_labels(input_csv_path, output_csv_path, num_classes=11):
         writer.writeheader()
 
         for row in iter_timestamp_labels(input_csv_path):
-            if row["Label"] < 0 or row["Label"] >= num_classes:
-                skipped_out_of_range[row["class_id_1_based"]] += 1
+            # Kiểm tra nếu nhãn (Label) nằm ngoài phạm vi hợp lệ (1 đến num_classes). Nếu có, đếm số lần bị bỏ qua cho mỗi Tag và tiếp tục vòng lặp mà không ghi dòng đó vào CSV đầu ra.
+            if row["Label"] < 1 or row["Label"] > num_classes:
+                skipped_out_of_range[row["Tag"]] += 1
                 continue
 
             key = (
@@ -119,6 +121,7 @@ def prepare_labels(input_csv_path, output_csv_path, num_classes=11):
                     "Subject": row["Subject"],
                     "Activity": row["Activity"],
                     "Trial": row["Trial"],
+                    "Tag": row["Tag"],
                     "Label": row["Label"]
                 }
             )
@@ -136,7 +139,7 @@ def prepare_labels(input_csv_path, output_csv_path, num_classes=11):
         )
     if skipped_out_of_range:
         skipped_summary = ", ".join(
-            f"Activity={key}: {count}"
+            f"Tag={key}: {count}"
             for key, count in sorted(skipped_out_of_range.items())
         )
         print(f"Skipped out-of-range labels for {num_classes} classes: {skipped_summary}")
@@ -169,7 +172,7 @@ def parse_args():
         "--num-classes",
         type=int,
         default=11,
-        help="Number of classifier output classes. Default: 11.",
+        help="Number of valid Tag labels. Default: 11.",
     )
     return parser.parse_args()
 

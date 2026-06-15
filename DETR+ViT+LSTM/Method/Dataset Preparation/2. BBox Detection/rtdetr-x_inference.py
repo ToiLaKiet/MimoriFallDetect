@@ -36,6 +36,31 @@ def detect_person_bboxes(
 ) -> np.ndarray:
     """Detect person bounding boxes with RT-DETR-X and return xyxy float32 boxes."""
 
+    detections = detect_person_detections(
+        image=image,
+        model=model,
+        model_path=model_path,
+        conf=conf,
+        iou=iou,
+        imgsz=imgsz,
+        device=device,
+        max_persons=max_persons,
+    )
+    return detections[:, :4]
+
+
+def detect_person_detections(
+    image: str | Path | np.ndarray,
+    model: Any | None = None,
+    model_path: str | Path = DEFAULT_RTDETR_MODEL,
+    conf: float = 0.25,
+    iou: float = 0.7,
+    imgsz: int | tuple[int, int] | None = None,
+    device: str | int | None = None,
+    max_persons: int | None = None,
+) -> np.ndarray:
+    """Detect people with RT-DETR-X and return xyxy, confidence, class rows."""
+
     rtdetr_model = (
         model
         if model is not None
@@ -55,18 +80,21 @@ def detect_person_bboxes(
 
     results = rtdetr_model.predict(**predict_kwargs)
     if not results:
-        return np.empty((0, 4), dtype=np.float32)
+        return np.empty((0, 6), dtype=np.float32)
 
     boxes_obj = results[0].boxes
     if boxes_obj is None or len(boxes_obj) == 0:
-        return np.empty((0, 4), dtype=np.float32)
+        return np.empty((0, 6), dtype=np.float32)
 
     boxes = boxes_obj.xyxy.detach().cpu().numpy().astype(np.float32)
     scores = boxes_obj.conf.detach().cpu().numpy().astype(np.float32)
+    classes = boxes_obj.cls.detach().cpu().numpy().astype(np.float32)
     order = np.argsort(scores)[::-1]
     if max_persons is not None and max_persons > 0:
         order = order[:max_persons]
-    return boxes[order]
+    return np.column_stack(
+        (boxes[order], scores[order], classes[order])
+    ).astype(np.float32)
 
 
 def detect_largest_person_bbox(

@@ -2,21 +2,27 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import re
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 from PIL import Image
 
-from yolo_inference import DEFAULT_YOLO_MODEL, detect_largest_person_bbox, load_yolo_model
+from yolo_inference import (
+    DEFAULT_YOLO_MODEL,
+    detect_person_detections as detect_yolo_person_detections,
+    load_yolo_model,
+)
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-DetectorFn = Callable[..., tuple[float, float, float, float] | None]
+DetectorFn = Callable[..., np.ndarray]
 ImageSizeArg = int | tuple[int, int]
 CameraRoi = tuple[int, int, int, int]
 DEFAULT_CAMERA_ROIS: dict[str, CameraRoi] = {
     "Camera1": (0, 0, 640, 480),
-    "Camera2": (3, 2, 591, 479),
+    "Camera2": (0, 0, 591, 479),
 }
 DEFAULT_CAMERA_IMGSZ: dict[str, ImageSizeArg] = {
     "Camera1": (384, 608),  # height, width
@@ -38,13 +44,13 @@ def load_detector_backend(
     detector: str,
     model_path: str | Path | None,
 ) -> tuple[Any, DetectorFn, str | Path]:
-    """Load one detector backend and return model plus bbox inference function."""
+    """Load one detector backend and return model plus detection function."""
 
     if detector == "yolo":
         resolved_model_path = model_path or DEFAULT_YOLO_MODEL
         return (
             load_yolo_model(resolved_model_path),
-            detect_largest_person_bbox,
+            detect_yolo_person_detections,
             resolved_model_path,
         )
 
@@ -54,17 +60,29 @@ def load_detector_backend(
         resolved_model_path = model_path or backend.DEFAULT_RTDETR_MODEL
         return (
             backend.load_rtdetr_model(resolved_model_path),
-            backend.detect_largest_person_bbox,
+            backend.detect_person_detections,
             resolved_model_path,
         )
 
     raise ValueError(f"Unsupported detector: {detector}")
 
 
+def natural_sort_key(value: str) -> tuple[tuple[int, int | str], ...]:
+    # Split the string into digit and non-digit parts, converting digit parts to integers for natural sorting (e.g., "Camera10" > "Camera2").
+    return tuple(
+        (1, int(part)) if part.isdigit() else (0, part.lower())
+        for part in re.split(r"(\d+)", value)
+        if part
+    )
+
+
 def iter_timestamp_images(image_dir: Path, limit: int = 0):
     """Yield image files under Subject/Activity/Trial/Camera folders."""
     count = 0
-    for image_path in sorted(image_dir.rglob("*")):
+    for image_path in sorted(
+        image_dir.rglob("*"),
+        key=lambda path: natural_sort_key(str(path.relative_to(image_dir))),
+    ):
         if not image_path.is_file():
             continue
         if image_path.suffix.lower() not in IMAGE_EXTENSIONS:
@@ -80,8 +98,27 @@ def iter_timestamp_images(image_dir: Path, limit: int = 0):
             return
 
 
+def iter_sequence_image_groups(image_dir: Path, limit: int = 0):
+    """Yield images grouped by Subject/Activity/Trial/Camera folder."""
+
+    groups: dict[Path, list[Path]] = {}
+    for image_path in iter_timestamp_images(image_dir, limit=limit):
+        relative_parts = image_path.relative_to(image_dir).parts
+        sequence_path = Path(*relative_parts[:4]) # For eg : Subject1/Activity1/Trial1/Camera1. * is used to unpack the first 4 parts of the relative path and create a new Path object representing the sequence folder.
+        groups.setdefault(sequence_path, []).append(image_path) 
+
+    for sequence_path in sorted(
+        groups,
+        key=lambda path: natural_sort_key(str(path)),
+    ):
+        yield sequence_path, sorted(
+            groups[sequence_path],
+            key=lambda path: natural_sort_key(path.name),
+        ) # yield the sequence path and the list of image paths sorted by filename. yeild is used to create a generator that can be iterated over, allowing for memory-efficient processing of large datasets.
+
+
 def normalize_camera_name(camera_name: str) -> str:
-    return "".join(char.lower() for char in camera_name if char.isalnum()) # Hàm normalize_camera_name nhận một chuỗi camera_name và trả về một chuỗi mới đã được chuẩn hóa. Cụ thể, nó loại bỏ tất cả các ký tự không phải là chữ cái hoặc số và chuyển tất cả các ký tự còn lại thành chữ thường. Ví dụ, nếu camera_name là "Camera 1", thì normalize_camera_name sẽ trả về "camera1". Điều này giúp đảm bảo rằng việc so sánh tên camera sẽ không bị ảnh hưởng bởi sự khác biệt về định dạng hoặc kiểu chữ.
+    return "".join(char.lower() for char in camera_name if char.isalnum())
 
 
 def camera_roi_for_image(
@@ -114,7 +151,7 @@ def camera_imgsz_for_image(
     image_path: Path,
     image_dir: Path,
 ) -> ImageSizeArg:
-    relative_parts = image_path.relative_to(image_dir).parts # cụ thể relative_parts sẽ là một tuple chứa các phần của đường dẫn tương đối từ image_dir đến image_path. Ví dụ, nếu image_dir là "/data/images" và image_path là "/data/images/Subject1/ActivityA/Trial1/Camera1/20220101_120000.png", thì relative_parts sẽ là ("Subject1", "ActivityA", "Trial1", "Camera1", "20220101_120000.png").
+    relative_parts = image_path.relative_to(image_dir).parts
     if len(relative_parts) < 4:
         raise ValueError(
             f"Cannot infer camera folder from image path: {image_path}"
@@ -186,6 +223,142 @@ def build_detector_input(
     return image.crop((left, top, right, bottom)).copy(), (left, top)
 
 
+def ensure_detection_array(detections: np.ndarray) -> np.ndarray:
+    detections = np.asarray(detections, dtype=np.float32)
+    if detections.size == 0:
+        return np.empty((0, 6), dtype=np.float32) 
+    if detections.ndim == 1:
+        detections = detections.reshape(1, -1) # this mean the detector returned a single detection as a 1D array, so we reshape it to (1, 6)
+    if detections.shape[1] != 6:
+        raise ValueError(
+            "Detector must return rows as [x1, y1, x2, y2, confidence, class_id]."
+        )
+    return detections
+
+
+def xyxy_to_xywh(boxes: np.ndarray) -> np.ndarray:
+    xywh = np.empty_like(boxes, dtype=np.float32)
+    xywh[:, 0] = (boxes[:, 0] + boxes[:, 2]) / 2.0
+    xywh[:, 1] = (boxes[:, 1] + boxes[:, 3]) / 2.0
+    xywh[:, 2] = np.maximum(0.0, boxes[:, 2] - boxes[:, 0])
+    xywh[:, 3] = np.maximum(0.0, boxes[:, 3] - boxes[:, 1])
+    return xywh
+
+
+class TrackerDetections:
+    # update method : BYTETracker expects a list of detections in the format of [x_center, y_center, width, height, confidence, class_id], so we create a wrapper class that takes the xyxy detections from our detector and provides the necessary properties to convert them to the expected format for tracking. This allows us to use the same detection output for both cropping and tracking without modifying the original detection code.
+    """Minimal Ultralytics Boxes-like wrapper used by BYTETracker."""
+
+    def __init__(self, detections: np.ndarray):
+        self.detections = ensure_detection_array(detections)
+
+    def __len__(self) -> int:
+        return len(self.detections)
+
+    @property
+    def xywh(self) -> np.ndarray:
+        return xyxy_to_xywh(self.detections[:, :4])
+
+    @property
+    def conf(self) -> np.ndarray:
+        return self.detections[:, 4]
+
+    @property
+    def cls(self) -> np.ndarray:
+        return self.detections[:, 5]
+
+
+def create_bytetrack_tracker(
+    max_missed: int,
+    match_thresh: float,
+    track_high_thresh: float = 0.25,
+    track_low_thresh: float = 0.1,
+    new_track_thresh: float = 0.25,
+):
+    try:
+        from ultralytics.trackers.byte_tracker import BYTETracker
+    except ModuleNotFoundError as exc:
+        if exc.name in {"lap", "lapx"}:
+            raise ImportError(
+                "ByteTrack requires the Ultralytics tracking dependency 'lapx'. "
+                "Install it in the runtime with: pip install lapx"
+            ) from exc
+        raise
+
+    args = argparse.Namespace(
+        tracker_type="bytetrack",
+        track_high_thresh=track_high_thresh,
+        track_low_thresh=track_low_thresh,
+        new_track_thresh=new_track_thresh,
+        track_buffer=max_missed,
+        match_thresh=match_thresh,
+        fuse_score=True,
+    )
+    return BYTETracker(args=args, frame_rate=18.4) # what if the frame rate is not 30? This is only used for motion prediction, so it may not be critical to get it exactly right. If the frame rate is known, it would be better to set it accordingly for improved tracking performance.
+
+
+def largest_bbox_from_detections(
+    detections: np.ndarray,
+) -> tuple[float, float, float, float] | None:
+    detections = ensure_detection_array(detections)
+    if len(detections) == 0:
+        return None
+
+    boxes = detections[:, :4]
+    widths = np.maximum(0.0, boxes[:, 2] - boxes[:, 0])
+    heights = np.maximum(0.0, boxes[:, 3] - boxes[:, 1])
+    largest_index = int(np.argmax(widths * heights))
+    return tuple(float(value) for value in boxes[largest_index])
+
+
+def track_area(track: np.ndarray) -> float:
+    width = max(0.0, float(track[2] - track[0]))
+    height = max(0.0, float(track[3] - track[1]))
+    return width * height
+
+
+def select_largest_track(tracks: np.ndarray) -> np.ndarray | None:
+    if len(tracks) == 0:
+        return None
+    areas = np.asarray([track_area(track) for track in tracks], dtype=np.float32)
+    return tracks[int(np.argmax(areas))] # shape: (x1, y1, x2, y2, track_id, confidence)
+
+
+def select_track_by_id(tracks: np.ndarray, track_id: int) -> np.ndarray | None:
+    if len(tracks) == 0:
+        return None
+    track_ids = tracks[:, 4].astype(np.int64)
+    matches = tracks[track_ids == track_id]
+    if len(matches) == 0:
+        return None
+    return matches[int(np.argmax(matches[:, 5]))]
+
+
+def detect_detections_in_roi(
+    image_path: Path,
+    model,
+    detect_detections: DetectorFn,
+    conf: float,
+    iou: float,
+    imgsz: ImageSizeArg,
+    device: str | int | None,
+    roi: CameraRoi,
+) -> tuple[np.ndarray, tuple[int, int]]:
+    with Image.open(image_path) as image_file:
+        image = image_file.convert("RGB")
+        detector_input, offset = build_detector_input(image, roi)
+        detections = detect_detections(
+            image=detector_input,
+            model=model,
+            conf=conf,
+            iou=iou,
+            imgsz=imgsz,
+            device=device,
+        )
+
+    return ensure_detection_array(detections), offset
+
+
 def save_crop_from_bbox(
     image_path: Path,
     output_path: Path,
@@ -214,7 +387,7 @@ def crop_person_image(
     image_path: Path,
     output_path: Path,
     model,
-    detect_bbox: DetectorFn,
+    detect_detections: DetectorFn,
     conf: float,
     iou: float,
     imgsz: ImageSizeArg | None,
@@ -231,7 +404,7 @@ def crop_person_image(
         image = image_file.convert("RGB")
         detector_input, (x_offset, y_offset) = build_detector_input(image, roi)
 
-        bbox = detect_bbox(
+        detections = detect_detections(
             image=detector_input,
             model=model,
             conf=conf,
@@ -240,6 +413,7 @@ def crop_person_image(
             device=device,
         )
 
+    bbox = largest_bbox_from_detections(detections)
     bbox = offset_bbox(bbox, x_offset, y_offset)
     return save_crop_from_bbox(
         image_path=image_path,
@@ -256,7 +430,13 @@ def update_stats(stats: dict[str, int], status: str) -> None:
     stats[status] += 1
 
 
-def print_progress(prefix: str, index: int, total: int, stats: dict[str, int], relative_path: Path) -> None:
+def print_progress(
+    prefix: str,
+    index: int,
+    total: int,
+    stats: dict[str, int],
+    relative_path: Path,
+) -> None:
     print(
         f"{prefix} "
         f"{index}/{total} | "
@@ -267,27 +447,136 @@ def print_progress(prefix: str, index: int, total: int, stats: dict[str, int], r
     )
 
 
+def crop_tracked_sequence(
+    sequence_path: Path,
+    image_paths: list[Path],
+    image_dir: Path,
+    output_dir: Path,
+    model,
+    detect_detections: DetectorFn,
+    conf: float,
+    iou: float,
+    device: str | int | None,
+    overwrite: bool,
+    max_missed: int,
+    track_match_thresh: float,
+    stats: dict[str, int],
+    processed_count: int,
+    total_images: int,
+    log_every: int,
+) -> int:
+    tracker = create_bytetrack_tracker(
+        max_missed=max_missed,
+        match_thresh=track_match_thresh,
+    )
+    target_track_id: int | None = None
+    missed_count = 0
+    target_lost_reported = False
+
+    for sequence_index, image_path in enumerate(image_paths, start=1):
+        # iterate through the images in the sequence, running detection and tracking to maintain a consistent target across frames. The first detected track in the first frame is selected as the target, and subsequent frames attempt to find that track ID. If the track is lost for too many frames, a warning is printed.
+        processed_count += 1
+        relative_path = image_path.relative_to(image_dir)
+        output_path = output_dir / relative_path
+        roi = camera_roi_for_image(image_path=image_path, image_dir=image_dir)
+        image_imgsz = camera_imgsz_for_image(
+            image_path=image_path,
+            image_dir=image_dir,
+        )
+        detections, (x_offset, y_offset) = detect_detections_in_roi(
+            image_path=image_path,
+            model=model,
+            detect_detections=detect_detections,
+            conf=conf,
+            iou=iou,
+            imgsz=image_imgsz,
+            device=device,
+            roi=roi,
+        )
+        tracks = tracker.update(TrackerDetections(detections)) # ByteTrack return format : list of tracks, where each track is represented as a numpy array with the format [x1, y1, x2, y2, track_id, confidence]. The tracker.update() method takes the current frame's detections and updates the internal state of the tracker, returning the list of active tracks after processing the new detections
+        bbox = None
+        if target_track_id is None:
+            target_track = select_largest_track(tracks)
+            if target_track is None:
+                if sequence_index == 1:
+                    print(
+                        "WARNING: ByteTrack could not initialize target on "
+                        f"first frame: {relative_path}"
+                    )
+            else:
+                target_track_id = int(target_track[4])
+                bbox = tuple(float(value) for value in target_track[:4])
+                if sequence_index > 1:
+                    print(
+                        "WARNING: ByteTrack target initialized after first "
+                        f"frame in {sequence_path}: {relative_path}"
+                    )
+        else:
+            target_track = select_track_by_id(tracks, target_track_id)
+            if target_track is None:
+                missed_count += 1
+                if missed_count >= max_missed and not target_lost_reported:
+                    print(
+                        "WARNING: ByteTrack target lost for "
+                        f"{missed_count} frame(s) in {sequence_path}. "
+                        f"Last checked frame: {relative_path}"
+                    )
+                    target_lost_reported = True
+            else:
+                missed_count = 0
+                target_lost_reported = False
+                bbox = tuple(float(value) for value in target_track[:4])
+
+        bbox = offset_bbox(bbox, x_offset, y_offset)
+        status = save_crop_from_bbox(
+            image_path=image_path,
+            output_path=output_path,
+            bbox=bbox,
+            overwrite=overwrite,
+        )
+        update_stats(stats, status)
+
+        if processed_count == total_images or processed_count % log_every == 0:
+            print_progress(
+                "BBox track",
+                processed_count,
+                total_images,
+                stats,
+                relative_path,
+            )
+
+    return processed_count
+
+
 def crop_dataset(
     image_dir: Path,
     output_dir: Path,
     detector: str = "yolo",
     model_path: str | Path | None = None,
-    conf: float = 0.25,
+    conf: float = 0.1,
     iou: float = 0.7,
     device: str | int | None = None,
     overwrite: bool = False,
     limit: int = 0,
     log_every: int = 100,
+    tracking: str = "bytetrack",
+    max_missed: int = 10,
+    track_match_thresh: float = 0.8,
 ) -> dict[str, int]:
     """Crop person images into output_dir while preserving input folder structure."""
 
     image_dir = image_dir.resolve()
     output_dir = output_dir.resolve()
-    image_paths = list(iter_timestamp_images(image_dir, limit=limit))
+    sequence_groups = list(iter_sequence_image_groups(image_dir, limit=limit))
+    image_paths = [
+        image_path
+        for _, sequence_image_paths in sequence_groups
+        for image_path in sequence_image_paths
+    ]
     if not image_paths:
         return {"seen": 0, "cropped": 0, "existing": 0, "missed": 0}
 
-    model, detect_bbox, resolved_model_path = load_detector_backend(
+    model, detect_detections, resolved_model_path = load_detector_backend(
         detector=detector,
         model_path=model_path,
     )
@@ -295,13 +584,44 @@ def crop_dataset(
     print(f"Model: {resolved_model_path}")
     print(f"Camera ROI: hardcoded ({len(DEFAULT_CAMERA_ROIS)} camera(s))")
     print(f"Camera imgsz: hardcoded ({len(DEFAULT_CAMERA_IMGSZ)} camera(s))")
+    print(f"Tracking: {tracking}")
+    if tracking == "bytetrack":
+        print(f"ByteTrack max_missed: {max_missed}")
+        print(f"ByteTrack match_thresh: {track_match_thresh}")
 
     stats = {
         "seen": 0,
         "cropped": 0,
         "existing": 0,
         "missed": 0,
+        "sequences": len(sequence_groups),
     }
+
+    if tracking == "bytetrack":
+        processed_count = 0
+        for sequence_path, sequence_image_paths in sequence_groups:
+            processed_count = crop_tracked_sequence(
+                sequence_path=sequence_path,
+                image_paths=sequence_image_paths,
+                image_dir=image_dir,
+                output_dir=output_dir,
+                model=model,
+                detect_detections=detect_detections,
+                conf=conf,
+                iou=iou,
+                device=device,
+                overwrite=overwrite,
+                max_missed=max_missed,
+                track_match_thresh=track_match_thresh,
+                stats=stats,
+                processed_count=processed_count,
+                total_images=len(image_paths),
+                log_every=log_every,
+            )
+        return stats
+
+    if tracking != "none":
+        raise ValueError(f"Unsupported tracking mode: {tracking}")
 
     for index, image_path in enumerate(image_paths, start=1):
         relative_path = image_path.relative_to(image_dir)
@@ -319,7 +639,7 @@ def crop_dataset(
             image_path=image_path,
             output_path=output_path,
             model=model,
-            detect_bbox=detect_bbox,
+            detect_detections=detect_detections,
             conf=conf,
             iou=iou,
             imgsz=image_imgsz,
@@ -359,12 +679,38 @@ def parse_args() -> argparse.Namespace:
             "for YOLO and rtdetr-x.pt for RT-DETR-X."
         ),
     )
-    parser.add_argument("--conf", type=float, default=0.5)
+    parser.add_argument(
+        "--conf",
+        type=float,
+        default=0.1,
+        help=(
+            "Detector confidence threshold. Default 0.1 keeps low-score boxes "
+            "available for ByteTrack association."
+        ),
+    )
     parser.add_argument("--iou", type=float, default=0.7)
     parser.add_argument("--device", default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=100)
+    parser.add_argument(
+        "--tracking",
+        choices=("bytetrack", "none"),
+        default="bytetrack",
+        help="Tracking mode. Default: bytetrack.",
+    )
+    parser.add_argument(
+        "--max-missed",
+        type=int,
+        default=10,
+        help="Maximum missed frames kept by ByteTrack before target is considered lost.",
+    )
+    parser.add_argument(
+        "--track-match-thresh",
+        type=float,
+        default=0.8,
+        help="ByteTrack association threshold. Higher is looser.",
+    )
     return parser.parse_args()
 
 
@@ -373,6 +719,7 @@ def main() -> None:
     if not args.image_dir.is_dir():
         raise ValueError(f"Image directory does not exist: {args.image_dir}")
     args.log_every = max(1, args.log_every)
+    args.max_missed = max(1, args.max_missed)
 
     stats = crop_dataset(
         image_dir=args.image_dir,
@@ -385,6 +732,9 @@ def main() -> None:
         overwrite=args.overwrite,
         limit=args.limit,
         log_every=args.log_every,
+        tracking=args.tracking,
+        max_missed=args.max_missed,
+        track_match_thresh=args.track_match_thresh,
     )
     print(f"Done. Output directory: {args.output_dir.resolve()}")
     print(f"Stats: {stats}")
