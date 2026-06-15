@@ -255,6 +255,9 @@ class TrackerDetections:
     def __len__(self) -> int:
         return len(self.detections)
 
+    def __getitem__(self, index):
+        return TrackerDetections(self.detections[index])
+
     @property
     def xywh(self) -> np.ndarray:
         return xyxy_to_xywh(self.detections[:, :4])
