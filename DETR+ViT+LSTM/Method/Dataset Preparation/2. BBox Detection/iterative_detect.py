@@ -294,7 +294,7 @@ def create_bytetrack_tracker(
         match_thresh=match_thresh,
         fuse_score=True,
     )
-    return BYTETracker(args=args, frame_rate=18.4) # what if the frame rate is not 30? This is only used for motion prediction, so it may not be critical to get it exactly right. If the frame rate is known, it would be better to set it accordingly for improved tracking performance.
+    return BYTETracker(args=args) # what if the frame rate is not 30? This is only used for motion prediction, so it may not be critical to get it exactly right. If the frame rate is known, it would be better to set it accordingly for improved tracking performance.
 
 
 def largest_bbox_from_detections(
