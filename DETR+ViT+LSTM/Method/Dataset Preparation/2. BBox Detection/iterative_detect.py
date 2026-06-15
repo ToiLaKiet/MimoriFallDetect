@@ -22,7 +22,7 @@ ImageSizeArg = int | tuple[int, int]
 CameraRoi = tuple[int, int, int, int]
 DEFAULT_CAMERA_ROIS: dict[str, CameraRoi] = {
     "Camera1": (0, 0, 640, 480),
-    "Camera2": (3, 4, 407, 479),
+    "Camera2": (0, 0, 514, 478),
 }
 DEFAULT_CAMERA_IMGSZ: dict[str, ImageSizeArg] = {
     "Camera1": (384, 608),  # height, width
