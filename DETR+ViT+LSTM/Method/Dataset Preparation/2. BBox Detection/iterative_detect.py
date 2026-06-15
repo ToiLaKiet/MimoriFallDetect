@@ -25,7 +25,7 @@ DEFAULT_CAMERA_ROIS: dict[str, CameraRoi] = {
     "Camera2": (0, 0, 514, 478),
 }
 DEFAULT_CAMERA_IMGSZ: dict[str, ImageSizeArg] = {
-    "Camera1": (384, 608),  # height, width
+    "Camera1": (480, 640),  # height, width
     "Camera2": (480, 608),  # height, width
 }
 
