@@ -12,6 +12,9 @@ from pathlib import Path
 
 SUBJECT_PATTERN = re.compile(r"^Subject\D*(\d+)\D*$", re.IGNORECASE)
 CLASS_NAMES = {0: "normal", 1: "fall"}
+TIMESTAMP_FROM_FILENAME = re.compile(
+    r"(\d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2}(?:\.\d+)?)"
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,7 @@ def validate_sequence(
     for rel_path in img_paths:
         if not isinstance(rel_path, str) or not rel_path.strip():
             return None
+
         full_path = image_folder / rel_path
         if not full_path.is_file():
             return None
@@ -91,9 +95,49 @@ def write_sequence(
     seq_dir = destination_dir / seq_name
     seq_dir.mkdir(parents=True, exist_ok=True)
 
+    record = sequence.record
+    subject = str(record.get("Subject", "")).strip()
+    activity = str(record.get("Activity", "")).strip()
+    trial = str(record.get("Trial", "")).strip()
+    camera = str(record.get("Camera", "")).strip()
+    fall_alert = int(record.get("fall_alert", 0))
+    img_paths = record.get("img_paths")
+
+    frames_meta: list[dict[str, object]] = []
     for frame_index, source_path in enumerate(sequence.resolved_paths):
         destination_path = seq_dir / f"frame_{frame_index:03d}.jpg"
         shutil.copy2(source_path, destination_path)
+
+        rel_path = ""
+        if isinstance(img_paths, list) and frame_index < len(img_paths):
+            rel_path = str(img_paths[frame_index])
+        match = TIMESTAMP_FROM_FILENAME.search(Path(rel_path or source_path.name).stem)
+        timestamp = match.group(1) if match else Path(rel_path or source_path.name).stem
+
+        frames_meta.append(
+            {
+                "frame_index": frame_index,
+                "frame_file": destination_path.name,
+                "timestamp": timestamp,
+                "source_rel_path": rel_path,
+                "source_abs_path": str(source_path),
+            }
+        )
+
+    # Per-sequence metadata to keep frame provenance & identifiers.
+    metadata = {
+        "Subject": subject,
+        "Activity": activity,
+        "Trial": trial,
+        "Camera": camera,
+        "fall_alert": fall_alert,
+        "sequence_name": seq_name,
+        "frame_count": len(sequence.resolved_paths),
+        "frames": frames_meta,
+    }
+    with (seq_dir / "metadata.json").open("w", encoding="utf-8") as file:
+        json.dump(metadata, file, ensure_ascii=False, indent=2)
+        file.write("\n")
 
 
 def export_split(
@@ -200,8 +244,8 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Build train/val/test image-sequence folders from sequences JSON. "
             "Sequences with missing frames are skipped. Subject 11 is split "
-            "between val and test with equal fall/normal counts in each split; "
-            "other subjects go to train."
+            "between val and test with equal "
+            "fall/normal counts in each split; other subjects go to train."
         )
     )
     parser.add_argument("--json-path", type=Path, required=True)
