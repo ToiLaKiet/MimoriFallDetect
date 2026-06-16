@@ -1,5 +1,6 @@
 *.png
 *.csv
 __pycache__/
-.pt
-.jsonDETR+ViT+LSTM/Method/Dataset Preparation/3. Sequences Dataset/sequences_data.json
+*.pt
+*.json
+DETR+ViT+LSTM/Method/Dataset Preparation/3. Sequences Dataset/sequences_data.json
