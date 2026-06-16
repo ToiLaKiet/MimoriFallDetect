@@ -227,7 +227,7 @@ def group_frames_by_sequence(
     groups: dict[tuple[str, str, str, str], list[ManifestFrame]] = defaultdict(list)
     for frame in frames:
         group_key = (frame.subject, frame.activity, frame.trial, frame.camera)
-        groups[group_key].append(frame)
+        groups[group_key].append(frame) # eg ('Subject1', 'Activity1', 'Trial1', 'Camera1') : [ManifestFrame(...), ManifestFrame(...), ...]
 
     for group_key, group_frames in groups.items():
         groups[group_key] = sorted(
