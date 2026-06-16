@@ -171,7 +171,7 @@ def parse_args():
     parser.add_argument(
         "--num-classes",
         type=int,
-        default=11,
+        default=12,
         help="Number of valid Tag labels. Default: 11.",
     )
     return parser.parse_args()
