@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from pathlib import Path
+from shutil import copy2
 
 import numpy as np
 import torch
@@ -22,7 +23,7 @@ def iter_sequence_image_paths(sequence_dir: Path) -> list[Path]:
         for path in sequence_dir.iterdir()
         if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
     ]
-    return sorted(image_paths, key=lambda path: path.name)
+    return sorted(image_paths, key=lambda path: path.name) # path.name() is different from path.stem() because path.name() includes the extension. extension is the part of the filename after the last dot. eg: Subject2/Activity2/Trial2/Camera2/frame_0000.jpg -> frame_0000.jpg.
 
 
 def iter_dataset_images(dataset_dir: Path) -> list[tuple[str, Path]]:
@@ -48,6 +49,28 @@ def iter_dataset_images(dataset_dir: Path) -> list[tuple[str, Path]]:
     return frames
 
 
+def iter_dataset_sequences(dataset_dir: Path) -> list[tuple[str, Path]]:
+    """Yield (split_name, sequence_dir) for every sequence folder in the dataset."""
+
+    sequences: list[tuple[str, Path]] = []
+    for split_name in SPLITS:
+        split_dir = dataset_dir / split_name
+        if not split_dir.is_dir():
+            continue
+
+        for class_name in CLASS_NAMES:
+            class_dir = split_dir / class_name
+            if not class_dir.is_dir():
+                continue
+
+            for sequence_dir in sorted(class_dir.iterdir()):
+                if not sequence_dir.is_dir():
+                    continue
+                sequences.append((split_name, sequence_dir))
+
+    return sequences
+
+
 def embedding_output_path(
     image_path: Path,
     dataset_dir: Path,
@@ -65,6 +88,29 @@ def resolve_device(device_name: str | None) -> torch.device:
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def maybe_copy_sequence_metadata(
+    sequence_dir: Path,
+    dataset_dir: Path,
+    output_dir: Path,
+    *,
+    skip_existing: bool,
+    stats: Counter,
+) -> None:
+    src = sequence_dir / "metadata.json"
+    if not src.is_file():
+        stats["metadata_missing"] += 1
+        return
+
+    dst = output_dir / src.relative_to(dataset_dir)
+    if skip_existing and dst.is_file():
+        stats["metadata_skipped"] += 1
+        return
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    copy2(src, dst)
+    stats["metadata_copied"] += 1
 
 
 def extract_dataset_embeddings(
@@ -90,35 +136,52 @@ def extract_dataset_embeddings(
         device=resolved_device,
     )
 
-    frames = iter_dataset_images(dataset_dir)
-    if limit > 0:
-        frames = frames[:limit]
-
     stats: Counter = Counter()
-    stats["frames_total"] = len(frames)
+    processed_frames = 0
+    sequences = iter_dataset_sequences(dataset_dir)
+    stats["sequences_total"] = len(sequences)
 
-    for split_name, image_path in frames:
-        output_path = embedding_output_path(image_path, dataset_dir, output_dir)
-        if skip_existing and output_path.is_file():
-            stats["frames_skipped"] += 1
-            continue
+    for split_name, sequence_dir in sequences:
+        maybe_copy_sequence_metadata(
+            sequence_dir=sequence_dir,
+            dataset_dir=dataset_dir,
+            output_dir=output_dir,
+            skip_existing=skip_existing,
+            stats=stats,
+        )
 
-        try:
-            with Image.open(image_path) as image:
-                rgb_image = image.convert("RGB")
-                embedding = estimator.extract_embedding(
-                    image=rgb_image,
-                    source=embedding_source,
-                )
-        except Exception:
-            stats["frames_failed"] += 1
-            print(f"Failed to extract embedding: {image_path}")
-            continue
+        for image_path in iter_sequence_image_paths(sequence_dir):
+            stats["frames_total"] += 1
+            if limit > 0 and processed_frames >= limit:
+                break
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(output_path, embedding)
-        stats["frames_written"] += 1
-        stats[f"{split_name}_written"] += 1
+            output_path = embedding_output_path(image_path, dataset_dir, output_dir)
+            if skip_existing and output_path.is_file():
+                stats["frames_skipped"] += 1
+                processed_frames += 1
+                continue
+
+            try:
+                with Image.open(image_path) as image:
+                    rgb_image = image.convert("RGB")
+                    embedding = estimator.extract_embedding(
+                        image=rgb_image,
+                        source=embedding_source,
+                    )
+            except Exception:
+                stats["frames_failed"] += 1
+                processed_frames += 1
+                print(f"Failed to extract embedding: {image_path}")
+                continue
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(output_path, embedding)
+            stats["frames_written"] += 1
+            stats[f"{split_name}_written"] += 1
+            processed_frames += 1
+
+        if limit > 0 and processed_frames >= limit:
+            break
 
     return dict(stats)
 
