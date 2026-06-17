@@ -176,7 +176,7 @@ def parse_args():
     parser.add_argument(
         "--num-classes",
         type=int,
-        default=12,
+        default=11,
         help=(
             "Number of valid Tag labels in range 1..N. "
             f"Additional tags {sorted(ADDITIONAL_VALID_TAGS)} are also kept. Default: 12."

@@ -207,14 +207,14 @@ def export_split(
     if augment_train and split_name == "train" and written_sequences and rng is not None:
         augment_count = round(len(written_sequences) * AUGMENT_RATIO)
         if augment_count > 0:
-            for source_seq_dir in rng.sample(written_sequences, augment_count):
-                method = write_augmented_sequence(
-                    source_seq_dir=source_seq_dir,
-                    augment_seq_name=f"{source_seq_dir.name}_augment",
-                    rng=rng,
+            for source_seq_dir in rng.sample(written_sequences, augment_count): #rng.sample is to sample the sequences randomly.
+                method = write_augmented_sequence( # write_augmented_sequence is to write the augmented sequences.
+                    source_seq_dir=source_seq_dir, # source_seq_dir is the directory of the source sequence.
+                    augment_seq_name=f"{source_seq_dir.name}_augment", # augment_seq_name is the name of the augmented sequence.
+                    rng=rng, # rng is the random number generator.
                 )
-                stats["train_augmented"] += 1
-                stats[f"train_augment_{method}"] += 1
+                stats["train_augmented"] += 1 # train_augmented is the number of the augmented sequences.
+                stats[f"train_augment_{method}"] += 1 # train_augment_{method} is the number of the augmented sequences by the method.
 
     return stats
 

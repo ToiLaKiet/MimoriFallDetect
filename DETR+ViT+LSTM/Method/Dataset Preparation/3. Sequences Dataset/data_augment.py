@@ -77,9 +77,6 @@ def write_augmented_sequence(
         "Camera": metadata.get("Camera", ""),
         "fall_alert": metadata.get("fall_alert", 0),
         "sequence_name": augment_seq_name,
-        "augmented_from": metadata.get("sequence_name", source_seq_dir.name),
-        "augment_method": method,
-        "augment_params": params,
         "frame_count": len(frames_meta),
         "frames": frames_meta,
     }
