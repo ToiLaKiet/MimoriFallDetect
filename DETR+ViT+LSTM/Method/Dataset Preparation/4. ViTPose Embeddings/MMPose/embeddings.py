@@ -174,7 +174,7 @@ def extract_dataset_embeddings(
                 print(f"Failed to extract embedding: {image_path}")
                 continue
 
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.parent.mkdir(parents=True, exist_ok=True) #exist_ok=True is to avoid the error if the directory already exists.
             np.save(output_path, embedding)
             stats["frames_written"] += 1
             stats[f"{split_name}_written"] += 1
