@@ -380,7 +380,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest-csv-path", type=Path, required=True)
     parser.add_argument("--output-path", type=Path, required=True)
     parser.add_argument("--sequence-length", type=int, default=10)
-    parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--stride", type=int, default=5)
     parser.add_argument("--fall-tags", type=parse_int_set, default=DEFAULT_FALL_TAGS)
     parser.add_argument("--fall-min-frames", type=int, default=2)
     parser.add_argument("--image-path-col", default="image_path")
