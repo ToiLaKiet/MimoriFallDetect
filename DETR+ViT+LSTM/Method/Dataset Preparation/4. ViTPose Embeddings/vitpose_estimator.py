@@ -48,15 +48,16 @@ class VitPoseEstimator:
         self,
         pose_model_name: str,
         device: torch.device,
-        dataset_index: int,
         allow_download: bool,
+        dataset_index: int = 0,
     ) -> None:
         configure_runtime_cache()
 
         from transformers import AutoProcessor, VitPoseForPoseEstimation  # noqa: PLC0415
 
         self.device = device
-        self.dataset_index = dataset_index # dataset_index is the index of the dataset. :)? 1 is for train, 2 is for val, 3 is for test.
+        # ViTPose++ only: MoE expert selector (0=COCO, 1=AiC, 2=MPII, ...).
+        self.dataset_index = dataset_index
         self.use_dataset_index = "plus" in pose_model_name.lower()
 
         print(f"Loading ViTPose model: {pose_model_name}")

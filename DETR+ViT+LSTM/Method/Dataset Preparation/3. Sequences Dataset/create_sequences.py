@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 
-SUBJECT_PATTERN = re.compile(r"^Subject\D*(\d+)\D*$", re.IGNORECASE)
+SUBJECT_PATTERN = re.compile(r"^Subject\D*(\d+)\D*$", re.IGNORECASE) # eg: Subject 11. No space between Subject and the number. 
 CLASS_NAMES = {0: "normal", 1: "fall"}
 SplitMode = Literal["train", "val-test"]
 
@@ -58,29 +58,61 @@ def validate_sequence(
     return ValidSequence(record=record, resolved_paths=tuple(resolved_paths))
 
 
+def parse_subject_set(values: list[str] | None) -> set[int] | None:
+    if not values:
+        return None
+    return {int(value) for value in values}
+
+
+def clear_split_dirs(output_dir: Path, split_names: tuple[str, ...]) -> None:
+    for split_name in split_names:
+        split_dir = output_dir / split_name
+        if split_dir.exists():
+            shutil.rmtree(split_dir)
+
+
+def existing_class_counters(split_dir: Path) -> dict[str, int]:
+    counters = {class_name: 0 for class_name in CLASS_NAMES.values()}
+    for class_name in CLASS_NAMES.values():
+        class_dir = split_dir / class_name
+        if not class_dir.is_dir():
+            continue
+        for path in class_dir.iterdir():
+            if not path.is_dir() or not path.name.startswith("seq_"):
+                continue
+            try:
+                counters[class_name] = max(counters[class_name], int(path.name[4:])) # path.name[4:] is the number of the sequence.
+            except ValueError:
+                continue
+    return counters
+
+
+def split_class(
+    sequences: list[ValidSequence],
+    val_ratio: float,
+    rng: random.Random,
+) -> tuple[list[ValidSequence], list[ValidSequence]]:
+    if not sequences:
+        return [], []
+
+    shuffled = list(sequences)
+    rng.shuffle(shuffled)
+    val_count = round(len(shuffled) * val_ratio)
+    return shuffled[:val_count], shuffled[val_count:]
+
+
 def split_val_test(
     fall_sequences: list[ValidSequence],
     normal_sequences: list[ValidSequence],
     val_ratio: float,
     seed: int,
 ) -> tuple[list[ValidSequence], list[ValidSequence]]:
-    sample_size = min(len(fall_sequences), len(normal_sequences))
-    if sample_size == 0:
-        return [], []
-
     rng = random.Random(seed)
-    fall_sample = rng.sample(fall_sequences, sample_size)
-    normal_sample = rng.sample(normal_sequences, sample_size)
-    rng.shuffle(fall_sample)
-    rng.shuffle(normal_sample)
+    fall_val, fall_test = split_class(fall_sequences, val_ratio, rng)
+    normal_val, normal_test = split_class(normal_sequences, val_ratio, rng)
 
-    val_count_per_class = round(sample_size * val_ratio)
-    val_sequences = (
-        fall_sample[:val_count_per_class] + normal_sample[:val_count_per_class]
-    )
-    test_sequences = (
-        fall_sample[val_count_per_class:] + normal_sample[val_count_per_class:]
-    )
+    val_sequences = fall_val + normal_val
+    test_sequences = fall_test + normal_test
     rng.shuffle(val_sequences)
     rng.shuffle(test_sequences)
     return val_sequences, test_sequences
@@ -142,9 +174,14 @@ def export_split(
     sequences: list[ValidSequence],
     output_dir: Path,
     split_name: str,
+    class_counters: dict[str, int] | None = None,
 ) -> Counter:
     stats: Counter = Counter()
-    class_counters = {class_name: 0 for class_name in CLASS_NAMES.values()}
+    if class_counters is None:
+        class_counters = {class_name: 0 for class_name in CLASS_NAMES.values()}
+
+    for class_name in CLASS_NAMES.values():
+        (output_dir / split_name / class_name).mkdir(parents=True, exist_ok=True)
 
     for sequence in sequences:
         class_name = CLASS_NAMES[int(sequence.record["fall_alert"])]
@@ -166,6 +203,7 @@ def build_dataset(
     image_folder: Path,
     output_dir: Path,
     split_mode: SplitMode = "train",
+    train_subjects: set[int] | None = None,
     val_subject: int = 11,
     val_ratio: float = 0.5,
     seed: int = 42,
@@ -180,6 +218,10 @@ def build_dataset(
         raise ValueError(f"Image folder does not exist: {image_folder}")
     if split_mode == "val-test" and not 0.0 < val_ratio < 1.0:
         raise ValueError("val_ratio must be between 0 and 1.")
+    if split_mode != "train" and train_subjects is not None:
+        raise ValueError("--train-subjects is only supported with --split-mode train.")
+
+    append_output = split_mode == "train" and train_subjects is not None
 
     records = load_records(json_path)
     stats: Counter = Counter()
@@ -190,7 +232,7 @@ def build_dataset(
     val_subject_normal: list[ValidSequence] = []
 
     for record in records:
-        subject_text = str(record.get("Subject", "")).strip()
+        subject_text = str(record.get("Subject", "")).strip() # eg: Subject 11
         if not subject_text:
             stats["records_missing_subject"] += 1
             continue
@@ -212,7 +254,13 @@ def build_dataset(
                 val_subject_fall.append(validated)
             else:
                 val_subject_normal.append(validated)
-        else:
+        elif (
+            split_mode == "train"
+            and train_subjects is not None 
+            and subject_number not in train_subjects # why not in train_subjects? because we want to export only the subjects that are not in train_subjects.
+        ):
+            stats["records_filtered_subject"] += 1
+        else: # if train_subjects is None, then all subjects are exported to train/.
             train_sequences.append(validated)
 
     stats["split_mode"] = split_mode
@@ -220,12 +268,24 @@ def build_dataset(
     stats["val_subject_normal_total"] = len(val_subject_normal)
     stats["train_total"] = len(train_sequences)
 
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if split_mode == "train" and not append_output:
+        clear_split_dirs(output_dir, ("train",))
+    elif split_mode == "val-test":
+        clear_split_dirs(output_dir, ("val", "test"))
 
     if split_mode == "train":
-        stats.update(export_split(train_sequences, output_dir, "train"))
+        class_counters = None
+        if append_output:
+            class_counters = existing_class_counters(output_dir / "train")
+        stats.update(
+            export_split(
+                train_sequences,
+                output_dir,
+                "train",
+                class_counters=class_counters,
+            )
+        )
         return dict(sorted(stats.items()))
 
     val_sequences, test_sequences = split_val_test(
@@ -246,10 +306,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Build image-sequence folders from sequences JSON. "
+            "Every split is written under {split}/{fall|normal}/seq_XXXX/. "
             "Sequences with missing frames are skipped. Use --split-mode train "
-            "to export all subjects except the held-out subject, or "
-            "--split-mode val-test to export only that subject split into "
-            "val and test with equal fall/normal counts."
+            "to export all subjects except the held-out subject into "
+            "train/fall and train/normal, or --split-mode val-test to export "
+            "only that subject into val/ and test/ (all sequences kept)."
         )
     )
     parser.add_argument("--json-path", type=Path, required=True)
@@ -260,8 +321,25 @@ def parse_args() -> argparse.Namespace:
         choices=("train", "val-test"),
         default="train",
         help=(
-            "train: export subjects other than --val-subject into train/. "
-            "val-test: export only --val-subject into val/ and test/."
+            "train: export subjects other than --val-subject into "
+            "train/fall/ and train/normal/ (by fall_alert). "
+            "Use --train-subjects to export one or more subjects at a time "
+            "and append to an existing train/ folder. "
+            "val-test: export only --val-subject into val/{fall,normal}/ "
+            "and test/{fall,normal}/."
+        ),
+    )
+    parser.add_argument(
+        "--train-subjects",
+        nargs="+",
+        type=int,
+        default=None,
+        metavar="SUBJECT",
+        help=(
+            "Only for --split-mode train. Export specific subject numbers, "
+            "e.g. --train-subjects 7 or --train-subjects 7 8 9 12. "
+            "When set, existing output is kept and new sequences are appended "
+            "with continued seq_XXXX numbering."
         ),
     )
     parser.add_argument("--val-subject", type=int, default=11)
@@ -270,8 +348,8 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help=(
-            "Fraction of each class from Subject 11 assigned to val; "
-            "rest go to test. Val and test each keep equal fall/normal counts."
+            "Fraction of each class from the held-out subject assigned to val; "
+            "the rest go to test. All fall and normal sequences are kept."
         ),
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -285,6 +363,7 @@ def main() -> None:
         image_folder=args.image_folder,
         output_dir=args.output_dir,
         split_mode=args.split_mode,
+        train_subjects=parse_subject_set(args.train_subjects),
         val_subject=args.val_subject,
         val_ratio=args.val_ratio,
         seed=args.seed,
@@ -294,9 +373,25 @@ def main() -> None:
     print(f"Image folder: {args.image_folder}")
     print(f"Output: {args.output_dir}")
     print(f"Split mode: {args.split_mode}")
+    if args.split_mode == "train" and args.train_subjects:
+        print(f"Train subjects: {args.train_subjects}")
     print(f"Held-out subject: Subject{args.val_subject}")
     if args.split_mode == "val-test":
         print(f"Val ratio: {args.val_ratio}")
+        print(
+            "Val layout: "
+            f"fall={stats.get('val_fall', 0)}, "
+            f"normal={stats.get('val_normal', 0)} | "
+            "Test layout: "
+            f"fall={stats.get('test_fall', 0)}, "
+            f"normal={stats.get('test_normal', 0)}"
+        )
+    if args.split_mode == "train":
+        print(
+            "Train layout: "
+            f"fall={stats.get('train_fall', 0)}, "
+            f"normal={stats.get('train_normal', 0)}"
+        )
     print(f"Stats: {stats}")
 
 

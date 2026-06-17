@@ -14,12 +14,9 @@ from vitpose_estimator import EmbeddingSource, VitPoseEstimator
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 SPLITS = ("train", "val", "test")
 CLASS_NAMES = ("fall", "normal")
-SPLIT_DATASET_INDEX = {
-    "train": 1,
-    "val": 2,
-    "test": 3,
-}
 DEFAULT_POSE_MODEL = "usyd-community/vitpose-base-simple"
+# ViTPose++ MoE expert index (0=COCO, 1=AiC, 2=MPII, ...). Ignored for non-plus models.
+DEFAULT_POSE_DATASET_INDEX = 0
 
 
 def iter_sequence_image_paths(sequence_dir: Path) -> list[Path]:
@@ -81,6 +78,7 @@ def extract_dataset_embeddings(
     allow_download: bool = False,
     embedding_source: EmbeddingSource = "backbone_last_gap",
     layer_index: int = -1,
+    dataset_index: int = DEFAULT_POSE_DATASET_INDEX,
     skip_existing: bool = False,
     limit: int = 0,
 ) -> dict[str, int]:
@@ -94,8 +92,8 @@ def extract_dataset_embeddings(
     estimator = VitPoseEstimator(
         pose_model_name=pose_model_name,
         device=resolved_device,
-        dataset_index=SPLIT_DATASET_INDEX["train"],
         allow_download=allow_download,
+        dataset_index=dataset_index,
     )
 
     frames = iter_dataset_images(dataset_dir)
@@ -105,12 +103,7 @@ def extract_dataset_embeddings(
     stats: Counter = Counter()
     stats["frames_total"] = len(frames)
 
-    current_split: str | None = None
     for split_name, image_path in frames:
-        if split_name != current_split:
-            estimator.dataset_index = SPLIT_DATASET_INDEX[split_name]
-            current_split = split_name
-
         output_path = embedding_output_path(image_path, dataset_dir, output_dir)
         if skip_existing and output_path.is_file():
             stats["frames_skipped"] += 1
@@ -189,6 +182,15 @@ def parse_args() -> argparse.Namespace:
         help="Hidden-state layer index when --embedding-source=backbone_hidden_gap.",
     )
     parser.add_argument(
+        "--dataset-index",
+        type=int,
+        default=DEFAULT_POSE_DATASET_INDEX,
+        help=(
+            "ViTPose++ MoE expert index only (0=COCO, 1=AiC, 2=MPII, ...). "
+            "Ignored for non-plus models such as vitpose-base-simple."
+        ),
+    )
+    parser.add_argument(
         "--skip-existing",
         action="store_true",
         help="Skip frames whose .npy output already exists.",
@@ -213,6 +215,7 @@ def main() -> None:
         allow_download=args.allow_download,
         embedding_source=args.embedding_source,
         layer_index=args.layer_index,
+        dataset_index=args.dataset_index,
         skip_existing=args.skip_existing,
         limit=args.limit,
     )
