@@ -15,6 +15,7 @@ OUTPUT_FIELDNAMES = [
     "Tag",
     "Label"
 ]
+ADDITIONAL_VALID_TAGS = {20}
 
 
 def parse_int(value, column_name, source_line):
@@ -86,6 +87,10 @@ def iter_timestamp_labels(input_csv_path):
             }
 
 
+def is_valid_label(label, num_classes, additional_valid_tags=ADDITIONAL_VALID_TAGS):
+    return (1 <= label <= num_classes) or (label in additional_valid_tags)
+
+
 def prepare_labels(input_csv_path, output_csv_path, num_classes=11):
     input_csv_path = resolve_input_csv(input_csv_path)
     output_csv_path = Path(output_csv_path)
@@ -101,8 +106,8 @@ def prepare_labels(input_csv_path, output_csv_path, num_classes=11):
         writer.writeheader()
 
         for row in iter_timestamp_labels(input_csv_path):
-            # Kiểm tra nếu nhãn (Label) nằm ngoài phạm vi hợp lệ (1 đến num_classes). Nếu có, đếm số lần bị bỏ qua cho mỗi Tag và tiếp tục vòng lặp mà không ghi dòng đó vào CSV đầu ra.
-            if row["Label"] < 1 or row["Label"] > num_classes:
+            # Kiểm tra nếu nhãn (Label) nằm ngoài phạm vi hợp lệ (1 đến num_classes, hoặc Tag bổ sung như 20).
+            if not is_valid_label(row["Label"], num_classes):
                 skipped_out_of_range[row["Tag"]] += 1
                 continue
 
@@ -172,7 +177,10 @@ def parse_args():
         "--num-classes",
         type=int,
         default=12,
-        help="Number of valid Tag labels. Default: 11.",
+        help=(
+            "Number of valid Tag labels in range 1..N. "
+            f"Additional tags {sorted(ADDITIONAL_VALID_TAGS)} are also kept. Default: 12."
+        ),
     )
     return parser.parse_args()
 

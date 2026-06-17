@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from data_augment import AUGMENT_RATIO, write_augmented_sequence
+
 
 SUBJECT_PATTERN = re.compile(r"^Subject\D*(\d+)\D*$", re.IGNORECASE) # eg: Subject 11. No space between Subject and the number. 
 CLASS_NAMES = {0: "normal", 1: "fall"}
@@ -79,6 +81,8 @@ def existing_class_counters(split_dir: Path) -> dict[str, int]:
             continue
         for path in class_dir.iterdir():
             if not path.is_dir() or not path.name.startswith("seq_"):
+                continue
+            if path.name.endswith("_augment"):
                 continue
             try:
                 counters[class_name] = max(counters[class_name], int(path.name[4:])) # path.name[4:] is the number of the sequence.
@@ -175,6 +179,8 @@ def export_split(
     output_dir: Path,
     split_name: str,
     class_counters: dict[str, int] | None = None,
+    rng: random.Random | None = None,
+    augment_train: bool = False,
 ) -> Counter:
     stats: Counter = Counter()
     if class_counters is None:
@@ -183,17 +189,32 @@ def export_split(
     for class_name in CLASS_NAMES.values():
         (output_dir / split_name / class_name).mkdir(parents=True, exist_ok=True)
 
+    written_sequences: list[Path] = []
     for sequence in sequences:
         class_name = CLASS_NAMES[int(sequence.record["fall_alert"])]
         class_counters[class_name] += 1
         seq_name = f"seq_{class_counters[class_name]:04d}"
+        seq_dir = output_dir / split_name / class_name / seq_name
         write_sequence(
             sequence=sequence,
             destination_dir=output_dir / split_name / class_name,
             seq_name=seq_name,
         )
+        written_sequences.append(seq_dir)
         stats[f"{split_name}_{class_name}"] += 1
         stats[f"{split_name}_total"] += 1
+
+    if augment_train and split_name == "train" and written_sequences and rng is not None:
+        augment_count = round(len(written_sequences) * AUGMENT_RATIO)
+        if augment_count > 0:
+            for source_seq_dir in rng.sample(written_sequences, augment_count):
+                method = write_augmented_sequence(
+                    source_seq_dir=source_seq_dir,
+                    augment_seq_name=f"{source_seq_dir.name}_augment",
+                    rng=rng,
+                )
+                stats["train_augmented"] += 1
+                stats[f"train_augment_{method}"] += 1
 
     return stats
 
@@ -278,12 +299,15 @@ def build_dataset(
         class_counters = None
         if append_output:
             class_counters = existing_class_counters(output_dir / "train")
+        augment_rng = random.Random(seed)
         stats.update(
             export_split(
                 train_sequences,
                 output_dir,
                 "train",
                 class_counters=class_counters,
+                rng=augment_rng,
+                augment_train=True,
             )
         )
         return dict(sorted(stats.items()))
@@ -309,8 +333,10 @@ def parse_args() -> argparse.Namespace:
             "Every split is written under {split}/{fall|normal}/seq_XXXX/. "
             "Sequences with missing frames are skipped. Use --split-mode train "
             "to export all subjects except the held-out subject into "
-            "train/fall and train/normal, or --split-mode val-test to export "
-            "only that subject into val/ and test/ (all sequences kept)."
+            "train/fall and train/normal (~50% of train sequences also get a "
+            "seq_XXXX_augment copy with brightness or rotate), or "
+            "--split-mode val-test to export only that subject into val/ and "
+            "test/ (all sequences kept)."
         )
     )
     parser.add_argument("--json-path", type=Path, required=True)
@@ -390,7 +416,10 @@ def main() -> None:
         print(
             "Train layout: "
             f"fall={stats.get('train_fall', 0)}, "
-            f"normal={stats.get('train_normal', 0)}"
+            f"normal={stats.get('train_normal', 0)} | "
+            f"Augmented: {stats.get('train_augmented', 0)} "
+            f"(brightness={stats.get('train_augment_brightness', 0)}, "
+            f"rotate={stats.get('train_augment_rotate', 0)})"
         )
     print(f"Stats: {stats}")
 
