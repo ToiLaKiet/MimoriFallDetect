@@ -124,6 +124,8 @@ class MMPoseVitPoseEstimator:
         )
 
     def _build_inputs(self, image: Image.Image) -> torch.Tensor:
+        # Hàm này để chuyển đổi ảnh từ định dạng PIL sang tensor torch và chuẩn hóa.
+        # Ngoài ra, nếu ảnh ko đúng kích thước, nó sẽ resize lại bằng bilinear interpolation.
         rgb = _to_rgb_uint8(image)
         chw = torch.from_numpy(rgb).permute(2, 0, 1).to(dtype=torch.float32)  # (3,H,W), 0..255
         chw = chw.to(self.device)
@@ -165,16 +167,16 @@ class MMPoseVitPoseEstimator:
 
         if feat.ndim == 4:  # (B,C,H,W)
             if source == "pre_head_gap":
-                emb = feat.mean(dim=(-2, -1))
+                emb = feat.mean(dim=(-2, -1)) # Shape : (B,C)
             elif source == "pre_head_flatten":
-                emb = feat.flatten(1)
+                emb = feat.flatten(1) # Shape : (B,C*H*W)
             else:
                 raise ValueError(f"Unsupported embedding source: {source}")
-        elif feat.ndim == 3:  # (B,T,C) token features
+        elif feat.ndim == 3:  # (B,T,C) token features, T is the number of tokens.
             if source == "pre_head_gap":
-                emb = feat.mean(dim=1)
+                emb = feat.mean(dim=1) # Shape : (B,C)
             elif source == "pre_head_flatten":
-                emb = feat.flatten(1)
+                emb = feat.flatten(1) # Shape : (B,T*C) 
             else:
                 raise ValueError(f"Unsupported embedding source: {source}")
         else:
