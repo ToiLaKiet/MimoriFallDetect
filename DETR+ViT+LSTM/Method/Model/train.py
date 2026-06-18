@@ -17,8 +17,14 @@ this_dir = Path(__file__).resolve().parent
 if str(this_dir) not in sys.path:
     sys.path.insert(0, str(this_dir))
 
-from data import DataConfig, make_dataloaders  # noqa: E402
-from model import ID_TO_LABEL, LSTMActivityClassifier, VitPoseSequenceDataset  # noqa: E402
+from data import DataConfig, make_dataset, make_dataloaders  # noqa: E402
+from model import (  # noqa: E402
+    EmbeddingStandardScaler,
+    ID_TO_LABEL,
+    LSTMActivityClassifier,
+    VitPoseSequenceDataset,
+    fit_embedding_scaler,
+)
 
 
 def resolve_device(device_name: str | None) -> torch.device:
@@ -232,7 +238,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--patience", type=int, default=10, help="Early stopping patience (epochs).")
-    p.add_argument("--min-delta", type=float, default=0.0, help="Minimum improvement to reset patience.")
+    p.add_argument("--min-delta", type=float, default=0.01, help="Minimum improvement to reset patience.") 
     p.add_argument("--early-stop-metric", choices=("val_loss", "val_acc"), default="val_loss")
     p.add_argument(
         "--class-weights",
@@ -248,7 +254,57 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bidirectional", action="store_true", default=True)
     p.add_argument("--dropout", type=float, default=0.2)
     p.add_argument("--pooling", choices=("last", "mean"), default="last")
+    p.add_argument(
+        "--no-standardize",
+        action="store_true",
+        help="Disable per-dimension standard scaling of embeddings.",
+    )
+    p.add_argument(
+        "--scaler-path",
+        type=Path,
+        default=None,
+        help="Load precomputed scaler (.npz) instead of fitting on train split.",
+    )
     return p.parse_args()
+
+
+def resolve_scaler(
+    args: argparse.Namespace,
+    *,
+    data_root: Path,
+    embedding_dim: int,
+    min_frames: int,
+    outdir: Path,
+) -> EmbeddingStandardScaler | None:
+    if args.no_standardize:
+        return None
+
+    if args.scaler_path is not None:
+        scaler = EmbeddingStandardScaler.load(args.scaler_path)
+        print(f"Loaded embedding scaler from {args.scaler_path.resolve()}")
+        return scaler
+
+    train_ds = make_dataset(
+        data_root=data_root,
+        split="train",
+        embedding_dim=embedding_dim,
+        min_frames=min_frames,
+    )
+    scaler = fit_embedding_scaler(train_ds)
+    scaler_path = outdir / "scaler.npz"
+    scaler.save(scaler_path)
+    n_frames = sum(sample.length for sample in train_ds.samples)
+    print(
+        f"Fitted embedding scaler on {n_frames} train frames "
+        f"(dim={embedding_dim}), saved to {scaler_path.resolve()}"
+    )
+    return scaler
+
+
+def scaler_checkpoint_payload(scaler: EmbeddingStandardScaler | None) -> dict[str, object]:
+    if scaler is None:
+        return {"scaler": None}
+    return {"scaler": scaler.to_dict()}
 
 
 def main() -> None:
@@ -259,22 +315,33 @@ def main() -> None:
     outdir: Path = args.outdir
     outdir.mkdir(parents=True, exist_ok=True)
 
+    scaler = resolve_scaler(
+        args,
+        data_root=args.data_root,
+        embedding_dim=1280,
+        min_frames=2,
+        outdir=outdir,
+    )
     data_cfg = DataConfig(
         data_root=args.data_root,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=(device.type == "cuda"),
+        scaler=scaler,
     )
     train_loader, val_loader, test_loader = make_dataloaders(data_cfg)
+    print(f"Data config: {data_cfg}")
 
     model = LSTMActivityClassifier(
-        input_dim=1280,
+        input_dim=data_cfg.embedding_dim, # config this to 1280 or 768 depending on the model
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         bidirectional=bool(args.bidirectional),
         dropout=float(args.dropout),
         pooling=args.pooling,
     ).to(device)
+
+    print(f"Model: {model}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
     train_dataset = train_loader.dataset
@@ -352,6 +419,7 @@ def main() -> None:
                 "confusion_matrix": cm,
                 "class_counts": class_counts,
                 "class_weights": class_weights,
+                **scaler_checkpoint_payload(scaler),
             },
         )
 
@@ -378,6 +446,7 @@ def main() -> None:
                     "confusion_matrix": cm,
                     "class_counts": class_counts,
                     "class_weights": class_weights,
+                    **scaler_checkpoint_payload(scaler),
                 },
             )
 
@@ -420,6 +489,7 @@ def main() -> None:
         "confusion_matrix": test_cm.tolist(),
         "class_counts": class_counts.tolist(),
         "class_weights": class_weights.tolist(),
+        "scaler": scaler.to_dict() if scaler is not None else None,
     }
     test_results_path.write_text(json.dumps(test_results, indent=2) + "\n", encoding="utf-8")
     print(f"Test results saved to {test_results_path.resolve()}")

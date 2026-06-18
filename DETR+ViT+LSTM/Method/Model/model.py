@@ -53,6 +53,87 @@ class SequenceSample:
     metadata: dict[str, Any] | None
 
 
+@dataclass(frozen=True)
+class EmbeddingStandardScaler:
+    """Per-dimension standard scaler fit on train frames: z = (x - mean) / std."""
+
+    mean: np.ndarray  # (D,)
+    std: np.ndarray  # (D,)
+    eps: float = 1e-8
+
+    def __post_init__(self) -> None:
+        if self.mean.ndim != 1 or self.std.ndim != 1:
+            raise ValueError(f"mean/std must be 1-D, got {self.mean.shape}, {self.std.shape}")
+        if self.mean.shape != self.std.shape:
+            raise ValueError(f"mean/std shape mismatch: {self.mean.shape} vs {self.std.shape}")
+
+    def transform(self, x: torch.Tensor) -> torch.Tensor:
+        mean = torch.as_tensor(self.mean, dtype=x.dtype, device=x.device)
+        std = torch.as_tensor(self.std, dtype=x.dtype, device=x.device)
+        return (x - mean) / std.clamp_min(self.eps)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"mean": self.mean, "std": self.std, "eps": self.eps}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> EmbeddingStandardScaler:
+        return cls(
+            mean=np.asarray(data["mean"], dtype=np.float32),
+            std=np.asarray(data["std"], dtype=np.float32),
+            eps=float(data.get("eps", 1e-8)),
+        )
+
+    def save(self, path: str | Path) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(path, mean=self.mean, std=self.std, eps=np.float64(self.eps))
+
+    @classmethod
+    def load(cls, path: str | Path) -> EmbeddingStandardScaler:
+        with np.load(path) as data:
+            return cls(
+                mean=data["mean"].astype(np.float32),
+                std=data["std"].astype(np.float32),
+                eps=float(data["eps"]) if "eps" in data else 1e-8,
+            )
+
+
+def fit_embedding_scaler(
+    dataset: VitPoseSequenceDataset,
+    *,
+    eps: float = 1e-8,
+) -> EmbeddingStandardScaler:
+    """Fit per-dimension mean/std on all frames in a dataset (intended for train split)."""
+    d = dataset.embedding_dim
+    n = 0
+    sum_x = np.zeros(d, dtype=np.float64)
+    sum_x2 = np.zeros(d, dtype=np.float64)
+
+    for sample in dataset.samples:
+        for p in _sorted_npy_paths(sample.sequence_dir):
+            arr = np.load(p)
+            arr = np.asarray(arr, dtype=np.float64)
+            if arr.ndim != 1 or arr.shape[0] != d:
+                raise ValueError(
+                    f"Unexpected embedding shape in {p}: got {arr.shape}, expected ({d},)"
+                )
+            sum_x += arr
+            sum_x2 += arr * arr
+            n += 1
+
+    if n == 0:
+        raise ValueError("Cannot fit scaler: no frames found in dataset.")
+
+    mean = sum_x / n
+    var = sum_x2 / n - mean**2
+    std = np.sqrt(np.maximum(var, eps))
+    return EmbeddingStandardScaler(
+        mean=mean.astype(np.float32),
+        std=std.astype(np.float32),
+        eps=eps,
+    )
+
+
 class VitPoseSequenceDataset(torch.utils.data.Dataset):
     """
     One sample == one sequence folder containing frame_*.npy (each is (1280,)).
@@ -72,12 +153,14 @@ class VitPoseSequenceDataset(torch.utils.data.Dataset):
         embedding_dim: int = 1280,
         load_metadata: bool = True,
         min_frames: int = 1,
+        scaler: EmbeddingStandardScaler | None = None,
     ) -> None:
         self.root_dir = Path(root_dir)
         self.split = split
         self.embedding_dim = int(embedding_dim)
         self.load_metadata = bool(load_metadata)
         self.min_frames = int(min_frames)
+        self.scaler = scaler
 
         split_dir = self.root_dir / split
         if not split_dir.is_dir():
@@ -140,6 +223,8 @@ class VitPoseSequenceDataset(torch.utils.data.Dataset):
             frames.append(torch.from_numpy(arr))
 
         x = torch.stack(frames, dim=0)  # (T, D)
+        if self.scaler is not None:
+            x = self.scaler.transform(x)
         out: dict[str, Any] = {
             "x": x,
             "length": x.shape[0],

@@ -13,7 +13,7 @@ this_dir = Path(__file__).resolve().parent
 if str(this_dir) not in sys.path:
     sys.path.insert(0, str(this_dir))
 
-from model import VitPoseSequenceDataset, pad_collate_sequences  # noqa: E402
+from model import EmbeddingStandardScaler, VitPoseSequenceDataset, pad_collate_sequences  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class DataConfig:
     pin_memory: bool = True
     embedding_dim: int = 1280
     min_frames: int = 2
+    scaler: EmbeddingStandardScaler | None = None
 
 
 def make_dataset(
@@ -32,6 +33,7 @@ def make_dataset(
     split: Literal["train", "val", "test"],
     embedding_dim: int = 1280,
     min_frames: int = 2,
+    scaler: EmbeddingStandardScaler | None = None,
 ) -> VitPoseSequenceDataset:
     return VitPoseSequenceDataset(
         root_dir=Path(data_root),
@@ -39,6 +41,7 @@ def make_dataset(
         embedding_dim=embedding_dim,
         min_frames=min_frames,
         load_metadata=False,
+        scaler=scaler,
     )
 
 
@@ -67,12 +70,14 @@ def make_dataloaders(cfg: DataConfig) -> tuple[DataLoader, DataLoader, DataLoade
         split="train",
         embedding_dim=cfg.embedding_dim,
         min_frames=cfg.min_frames,
+        scaler=cfg.scaler,
     )
     val_ds = make_dataset(
         data_root=cfg.data_root,
         split="val",
         embedding_dim=cfg.embedding_dim,
         min_frames=cfg.min_frames,
+        scaler=cfg.scaler,
     )
 
     train_loader = make_loader(
@@ -98,6 +103,7 @@ def make_dataloaders(cfg: DataConfig) -> tuple[DataLoader, DataLoader, DataLoade
             split="test",
             embedding_dim=cfg.embedding_dim,
             min_frames=cfg.min_frames,
+            scaler=cfg.scaler,
         )
         test_loader = make_loader(
             test_ds,
