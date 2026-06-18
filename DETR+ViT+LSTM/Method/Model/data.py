@@ -61,7 +61,7 @@ def make_loader(
     )
 
 
-def make_dataloaders(cfg: DataConfig) -> tuple[DataLoader, DataLoader]:
+def make_dataloaders(cfg: DataConfig) -> tuple[DataLoader, DataLoader, DataLoader | None]:
     train_ds = make_dataset(
         data_root=cfg.data_root,
         split="train",
@@ -89,5 +89,23 @@ def make_dataloaders(cfg: DataConfig) -> tuple[DataLoader, DataLoader]:
         num_workers=cfg.num_workers,
         pin_memory=cfg.pin_memory,
     )
-    return train_loader, val_loader
+
+    test_dir = Path(cfg.data_root) / "test"
+    test_loader: DataLoader | None = None
+    if test_dir.is_dir():
+        test_ds = make_dataset(
+            data_root=cfg.data_root,
+            split="test",
+            embedding_dim=cfg.embedding_dim,
+            min_frames=cfg.min_frames,
+        )
+        test_loader = make_loader(
+            test_ds,
+            batch_size=cfg.batch_size,
+            shuffle=False,
+            num_workers=cfg.num_workers,
+            pin_memory=cfg.pin_memory,
+        )
+
+    return train_loader, val_loader, test_loader
 

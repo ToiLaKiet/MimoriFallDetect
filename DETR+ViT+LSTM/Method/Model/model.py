@@ -18,7 +18,7 @@ ID_TO_LABEL: dict[int, LabelName] = {v: k for k, v in LABEL_TO_ID.items()}
 
 def _sorted_npy_paths(sequence_dir: Path) -> list[Path]:
     npys = [p for p in sequence_dir.iterdir() if p.is_file() and p.suffix.lower() == ".npy"]
-    return sorted(npys, key=lambda p: p.name)
+    return sorted(npys, key=lambda p: p.name) 
 
 
 def _infer_label_from_path(sequence_dir: Path) -> int | None:
@@ -55,7 +55,7 @@ class SequenceSample:
 
 class VitPoseSequenceDataset(torch.utils.data.Dataset):
     """
-    One sample == one sequence folder containing frame_*.npy (each is (768,)).
+    One sample == one sequence folder containing frame_*.npy (each is (1280,)).
 
     Supports layouts:
       - train/fall/seq001/frame*.npy
@@ -236,6 +236,7 @@ class LSTMActivityClassifier(nn.Module):
         )
 
         out_dim = self.hidden_dim * (2 if self.bidirectional else 1)
+
         self.head = nn.Sequential(
             nn.LayerNorm(out_dim),
             nn.Dropout(float(dropout)),

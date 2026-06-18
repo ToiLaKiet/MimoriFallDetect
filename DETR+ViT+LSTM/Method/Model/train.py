@@ -18,7 +18,7 @@ if str(this_dir) not in sys.path:
     sys.path.insert(0, str(this_dir))
 
 from data import DataConfig, make_dataloaders  # noqa: E402
-from model import LSTMActivityClassifier  # noqa: E402
+from model import ID_TO_LABEL, LSTMActivityClassifier, VitPoseSequenceDataset  # noqa: E402
 
 
 def resolve_device(device_name: str | None) -> torch.device:
@@ -152,9 +152,72 @@ def evaluate(
     }
 
 
+def count_class_labels(dataset: VitPoseSequenceDataset, num_classes: int = 2) -> torch.Tensor:
+    counts = torch.zeros(num_classes, dtype=torch.long)
+    for sample in dataset.samples:
+        if sample.label is None:
+            continue
+        label = int(sample.label)
+        if label < 0 or label >= num_classes:
+            raise ValueError(f"Unexpected label id {label} in {sample.sequence_dir}")
+        counts[label] += 1
+    return counts
+
+
+def compute_balanced_class_weights(counts: torch.Tensor) -> torch.Tensor:
+    """Balanced weights: w_c = N / (K * n_c)."""
+    n = int(counts.sum().item())
+    k = int(counts.numel())
+    if n == 0:
+        raise ValueError("Cannot compute class weights: no labeled training samples.")
+
+    weights = torch.zeros(k, dtype=torch.float32)
+    for c in range(k):
+        n_c = int(counts[c].item())
+        if n_c == 0:
+            raise ValueError(f"Cannot compute class weights: class {c} ({ID_TO_LABEL.get(c, '?')}) has 0 samples.")
+        weights[c] = n / (k * n_c)
+    return weights
+
+
+def parse_class_weights_arg(value: str, num_classes: int = 2) -> torch.Tensor:
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    if len(parts) != num_classes:
+        raise ValueError(f"--class-weights expects {num_classes} comma-separated values, got {len(parts)}.")
+    return torch.tensor([float(p) for p in parts], dtype=torch.float32)
+
+
+def build_criterion(
+    train_dataset: VitPoseSequenceDataset,
+    *,
+    device: torch.device,
+    class_weights_arg: str | None,
+    num_classes: int = 2,
+) -> tuple[nn.Module, torch.Tensor, torch.Tensor]:
+    counts = count_class_labels(train_dataset, num_classes=num_classes)
+    if class_weights_arg is not None:
+        weights = parse_class_weights_arg(class_weights_arg, num_classes=num_classes)
+    else:
+        weights = compute_balanced_class_weights(counts)
+
+    for c in range(num_classes):
+        name = ID_TO_LABEL.get(c, str(c))
+        print(f"Class counts (train): {name}={int(counts[c].item())}")
+    weight_parts = [f"{ID_TO_LABEL.get(c, str(c))}={weights[c].item():.4f}" for c in range(num_classes)]
+    print(f"Class weights: {', '.join(weight_parts)}")
+
+    return nn.CrossEntropyLoss(weight=weights.to(device)), counts, weights
+
+
 def save_checkpoint(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, path)
+
+
+def load_checkpoint(path: Path, model: nn.Module, device: torch.device) -> dict:
+    ckpt = torch.load(path, map_location=device)
+    model.load_state_dict(ckpt["model_state"])
+    return ckpt
 
 
 def parse_args() -> argparse.Namespace:
@@ -171,6 +234,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--patience", type=int, default=10, help="Early stopping patience (epochs).")
     p.add_argument("--min-delta", type=float, default=0.0, help="Minimum improvement to reset patience.")
     p.add_argument("--early-stop-metric", choices=("val_loss", "val_acc"), default="val_loss")
+    p.add_argument(
+        "--class-weights",
+        type=str,
+        default=None,
+        help="Optional manual class weights as 'w_normal,w_fall' (label ids 0,1). "
+        "If omitted, weights are computed from train split as N/(K*n_c).",
+    )
 
     # Model params (as requested defaults)
     p.add_argument("--hidden-dim", type=int, default=256)
@@ -189,14 +259,13 @@ def main() -> None:
     outdir: Path = args.outdir
     outdir.mkdir(parents=True, exist_ok=True)
 
-    train_loader, val_loader = make_dataloaders(
-        DataConfig(
-            data_root=args.data_root,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            pin_memory=(device.type == "cuda"),
-        )
+    data_cfg = DataConfig(
+        data_root=args.data_root,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=(device.type == "cuda"),
     )
+    train_loader, val_loader, test_loader = make_dataloaders(data_cfg)
 
     model = LSTMActivityClassifier(
         input_dim=1280,
@@ -208,7 +277,13 @@ def main() -> None:
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
-    criterion = nn.CrossEntropyLoss()
+    train_dataset = train_loader.dataset
+    assert isinstance(train_dataset, VitPoseSequenceDataset)
+    criterion, class_counts, class_weights = build_criterion(
+        train_dataset,
+        device=device,
+        class_weights_arg=args.class_weights,
+    )
 
     early = EarlyStopping(
         patience=int(args.patience),
@@ -275,6 +350,8 @@ def main() -> None:
                 "val_loss": val_loss,
                 "val_acc": val_acc,
                 "confusion_matrix": cm,
+                "class_counts": class_counts,
+                "class_weights": class_weights,
             },
         )
 
@@ -299,6 +376,8 @@ def main() -> None:
                     "val_loss": val_loss,
                     "val_acc": val_acc,
                     "confusion_matrix": cm,
+                    "class_counts": class_counts,
+                    "class_weights": class_weights,
                 },
             )
 
@@ -308,6 +387,42 @@ def main() -> None:
                 f"(best {args.early_stop_metric}={early.best}, patience={early.patience})."
             )
             break
+
+    if test_loader is None:
+        print("No test/ split found — skipping test evaluation.")
+        return
+
+    if not best_path.is_file():
+        print(f"No checkpoint at {best_path} — skipping test evaluation.")
+        return
+
+    print(f"\nEvaluating best checkpoint on test set: {best_path}")
+    ckpt = load_checkpoint(best_path, model, device)
+    te = evaluate(model, test_loader, device=device, criterion=criterion, num_classes=2)
+
+    test_loss = float(te["loss"])
+    test_acc = float(te["acc"])
+    test_cm = te["confusion_matrix"]
+    assert isinstance(test_cm, torch.Tensor)
+
+    print(f"Test loss {test_loss:.4f} acc {test_acc:.4f}")
+    print(f"Confusion matrix (rows=true, cols=pred):\n{test_cm.numpy()}")
+    print(f"Best checkpoint epoch: {ckpt.get('epoch', '?')}")
+
+    test_results_path = outdir / "test_results.json"
+    test_results = {
+        "checkpoint": str(best_path.resolve()),
+        "best_epoch": ckpt.get("epoch"),
+        "val_loss": float(ckpt.get("val_loss", float("nan"))),
+        "val_acc": float(ckpt.get("val_acc", float("nan"))),
+        "test_loss": test_loss,
+        "test_acc": test_acc,
+        "confusion_matrix": test_cm.tolist(),
+        "class_counts": class_counts.tolist(),
+        "class_weights": class_weights.tolist(),
+    }
+    test_results_path.write_text(json.dumps(test_results, indent=2) + "\n", encoding="utf-8")
+    print(f"Test results saved to {test_results_path.resolve()}")
 
 
 if __name__ == "__main__":
