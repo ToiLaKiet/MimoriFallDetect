@@ -163,11 +163,11 @@ class MMPoseVitPoseEstimator:
         inputs = self._build_inputs(image)
 
         feats = self.model.extract_feat(inputs)
-        feat = feats[-1] if isinstance(feats, (tuple, list)) else feats
+        feat = feats[-1] if isinstance(feats, (tuple, list)) else feats  # feats[-1] is the last feature map.
 
-        if feat.ndim == 4:  # (B,C,H,W)
+        if feat.ndim == 4: 
             if source == "pre_head_gap":
-                emb = feat.mean(dim=(-2, -1)) # Shape : (B,C)
+                emb = feat.mean(dim=(-2, -1)) # Shape : (B,C). Mean theo chiều (H,W). tức là lấy trung bình theo chiều cao và chiều rộng.
             elif source == "pre_head_flatten":
                 emb = feat.flatten(1) # Shape : (B,C*H*W)
             else:
