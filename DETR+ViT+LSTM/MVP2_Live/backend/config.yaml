@@ -1,0 +1,23 @@
+# MimamoriFall — model paths shared with MVP/backend (no duplicate weights).
+
+checkpoint: ../../runs5/best.pt
+
+rtdetr_model: ../../MVP/backend/rtdetr-x.pt
+rtdetr_conf: 0.3
+rtdetr_iou: 0.7
+
+mmpose_config: ../../MVP/backend/vitpose/td-hm_ViTPose-huge-simple_8xb64-210e_coco-256x192.py
+mmpose_checkpoint: ../../MVP/backend/vitpose/td-hm_ViTPose-huge-simple_8xb64-210e_coco-256x192-ffd48c05_20230314.pth
+embedding_source: pre_head_gap
+
+window_size: 10
+embedding_dim: 1280
+
+# Alert FSM: fall→normal then monitor bbox stability for this many seconds.
+stability_seconds: 5
+stability_min_mean_iou: 0.65
+stability_max_center_shift: 0.12
+alert_cooldown_seconds: 30
+
+# null = auto (cuda > mps > cpu)
+device: null
