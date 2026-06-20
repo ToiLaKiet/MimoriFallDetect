@@ -4,4 +4,30 @@ __pycache__/
 *.pt
 *.json
 *.pth
+*.npy
 DETR+ViT+LSTM/Method/Dataset Preparation/3. Sequences Dataset/sequences_data.json
+
+.venv
+venv
+env/
+ENV/
+
+# Các file cache của Python
+__pycache__/
+*.pyc
+
+# Dữ liệu (Dataset) - Hãy đổi tên theo thư mục data thực tế của bạn
+data/
+datasets/
+
+# Checkpoint lưu trữ trọng số mô hình (Weights)
+*.pth
+*.ckpt
+*.h5
+*.bin
+weights/
+checkpoints/
+runs/
+
+# File hệ thống của Mac
+.DS_Store
