@@ -5,8 +5,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from PIL import Image
+
 from agent import trigger_agent
 from config_loader import AppConfig
+from frame_codec import encode_rgb_jpeg_base64
 from pipeline import FrameResult, is_bbox_pair_stable
 
 
@@ -69,7 +72,7 @@ class AlertStateMachine:
             max_center_shift=self.config.stability_max_center_shift,
         )
 
-    def update(self, frame: FrameResult) -> dict[str, Any]:
+    def update(self, frame: FrameResult, *, rgb_image: Image.Image | None = None) -> dict[str, Any]:
         self._exit_cooldown_if_done()
 
         current_label = self._current_label(frame)
@@ -126,7 +129,7 @@ class AlertStateMachine:
                 elapsed = self._now() - self.monitoring_started_at
                 if elapsed >= self.config.stability_seconds:
                     self.state = AlertState.TRIGGERED
-                    context = {
+                    context: dict[str, Any] = {
                         "frame_index": frame.index,
                         "frame_name": frame.name,
                         "bbox_xyxy": bbox,
@@ -134,6 +137,11 @@ class AlertStateMachine:
                         "prev_label": self.prev_label,
                         "current_label": current_label,
                     }
+                    if rgb_image is not None:
+                        width, height = rgb_image.size
+                        context["frame_image_base64"] = encode_rgb_jpeg_base64(rgb_image)
+                        context["frame_image_width"] = width
+                        context["frame_image_height"] = height
                     self.agent_result = trigger_agent(context)
                     trigger_now = True
                     self.last_reason = "stable_5s_trigger_agent"

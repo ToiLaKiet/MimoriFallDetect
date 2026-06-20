@@ -1,0 +1,24 @@
+# MVP inference config — edit paths here to switch checkpoints / models.
+# Paths are resolved relative to this file unless absolute.
+
+checkpoint: ../../runs5/best.pt
+
+rtdetr_model: rtdetr-x.pt
+rtdetr_conf: 0.3
+rtdetr_iou: 0.7
+
+# MMPose ViTPose (see MMPose/mmpose_vitpose_estimator.py)
+mmpose_config: vitpose/td-hm_ViTPose-huge-simple_8xb64-210e_coco-256x192.py
+mmpose_checkpoint: vitpose/td-hm_ViTPose-huge-simple_8xb64-210e_coco-256x192-ffd48c05_20230314.pth
+embedding_source: pre_head_gap
+
+window_size: 10
+embedding_dim: 1280
+
+# After last "fall" frame: check bbox stability over this many frames.
+stability_frames: 100
+stability_min_mean_iou: 0.65
+stability_max_center_shift: 0.12
+
+# null = auto (cuda > mps > cpu)
+device: null

@@ -479,6 +479,12 @@ def main() -> None:
     print(f"Best checkpoint epoch: {ckpt.get('epoch', '?')}")
 
     test_results_path = outdir / "test_results.json"
+
+    scaler_dict = scaler.to_dict()
+
+    scaler_dict["mean"] = scaler_dict["mean"].tolist()
+    scaler_dict["std"] = scaler_dict["std"].tolist()
+
     test_results = {
         "checkpoint": str(best_path.resolve()),
         "best_epoch": ckpt.get("epoch"),
@@ -489,8 +495,9 @@ def main() -> None:
         "confusion_matrix": test_cm.tolist(),
         "class_counts": class_counts.tolist(),
         "class_weights": class_weights.tolist(),
-        "scaler": scaler.to_dict() if scaler is not None else None,
+        "scaler": scaler_dict if scaler_dict is not None else None,
     }
+
     test_results_path.write_text(json.dumps(test_results, indent=2) + "\n", encoding="utf-8")
     print(f"Test results saved to {test_results_path.resolve()}")
 

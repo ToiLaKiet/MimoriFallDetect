@@ -14,7 +14,7 @@ from vitpose_estimator import EmbeddingSource, VitPoseEstimator
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 SPLITS = ("train", "val", "test")
 CLASS_NAMES = ("fall", "normal")
-DEFAULT_POSE_MODEL = "usyd-community/vitpose-base-simple"
+DEFAULT_POSE_MODEL = "usyd-community/vitpose-huge-simple"
 # ViTPose++ MoE expert index (0=COCO, 1=AiC, 2=MPII, ...). Ignored for non-plus models.
 DEFAULT_POSE_DATASET_INDEX = 0
 

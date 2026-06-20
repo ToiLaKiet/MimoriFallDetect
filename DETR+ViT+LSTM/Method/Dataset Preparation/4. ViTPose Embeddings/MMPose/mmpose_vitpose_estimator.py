@@ -42,6 +42,64 @@ def _normalize_chw_0_255(
     return (chw_0_255 - mean_t) / std_t
 
 
+def _bootstrap_openmmlab_for_macos() -> None:
+    """Stub optional deps so mmpose can import with mmcv-lite on macOS."""
+    import sys
+    from types import ModuleType
+
+    if "mmdet" not in sys.modules:
+        mmdet = ModuleType("mmdet")
+        mmdet_utils = ModuleType("mmdet.utils")
+        mmdet_utils.ConfigType = dict
+        mmdet_utils.reduce_mean = lambda tensor: tensor
+        mmdet.utils = mmdet_utils
+        sys.modules["mmdet"] = mmdet
+        sys.modules["mmdet.utils"] = mmdet_utils
+
+    if "mmcv.ops" not in sys.modules:
+        mmcv_ops = ModuleType("mmcv.ops")
+
+        class MultiScaleDeformableAttention:  # noqa: N801
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+        mmcv_ops.MultiScaleDeformableAttention = MultiScaleDeformableAttention
+        mmcv_ops.active_rotated_filter = lambda *args, **kwargs: None
+        sys.modules["mmcv.ops"] = mmcv_ops
+
+
+def _init_mmpose_model(config_path: str | Path, checkpoint_path: str | Path, device: str):
+    """Load a top-down pose model without mmpose.apis (macOS / mmcv-lite friendly)."""
+    from mmengine.config import Config
+    from mmengine.registry import init_default_scope
+    from mmengine.runner import load_checkpoint
+    from mmpose.registry import MODELS
+
+    _bootstrap_openmmlab_for_macos()
+    init_default_scope("mmpose")
+    cfg = Config.fromfile(str(config_path))
+    model = MODELS.build(cfg.model)
+    try:
+        load_checkpoint(model, str(checkpoint_path), map_location="cpu")
+    except Exception:
+        # PyTorch 2.6+ defaults weights_only=True; OpenMMLab checkpoints need False.
+        ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+        state = ckpt.get("state_dict", ckpt)
+        model.load_state_dict(state, strict=False)
+    model.to(device)
+    model.eval()
+    return model
+
+
+def _load_mmpose_model(config_path: str | Path, checkpoint_path: str | Path, device: str):
+    try:
+        from mmpose.apis import init_model  # noqa: PLC0415
+
+        return init_model(str(config_path), str(checkpoint_path), device=device)
+    except Exception:
+        return _init_mmpose_model(config_path, checkpoint_path, device)
+
+
 class MMPoseVitPoseEstimator:
     """Extract ViTPose features from MMPose right before the pose head.
 
@@ -69,13 +127,16 @@ class MMPoseVitPoseEstimator:
             ) from exc
 
         try:
-            from mmpose.apis import init_model  # noqa: PLC0415
+            import mmpose  # noqa: F401  # pylint: disable=unused-import
         except Exception as exc:  # pragma: no cover
-            raise RuntimeError("Missing dependency `mmpose`. Install MMPose v1.x.") from exc
+            raise RuntimeError(
+                "Missing dependency `mmpose`. Install with Python 3.10: "
+                "./setup_env.sh (see MVP/backend/setup_env.sh)."
+            ) from exc
 
-        self.model = init_model(
-            str(config_path),
-            str(checkpoint_path),
+        self.model = _load_mmpose_model(
+            config_path=config_path,
+            checkpoint_path=checkpoint_path,
             device=str(device),
         )
         self.model.eval()

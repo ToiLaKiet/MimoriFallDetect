@@ -45,7 +45,7 @@ class LiveSession:
         )
         self._frame_index += 1
 
-        alert = self._fsm.update(frame)
+        alert = self._fsm.update(frame, rgb_image=rgb_image)
 
         return {
             "frame": frame.to_dict(),

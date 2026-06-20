@@ -3,4 +3,5 @@
 __pycache__/
 *.pt
 *.json
+*.pth
 DETR+ViT+LSTM/Method/Dataset Preparation/3. Sequences Dataset/sequences_data.json

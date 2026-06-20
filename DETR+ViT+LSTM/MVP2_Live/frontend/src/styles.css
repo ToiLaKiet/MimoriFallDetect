@@ -1,0 +1,268 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  --bg: #0f172a;
+  --surface: #1e293b;
+  --surface-2: #334155;
+  --text: #f1f5f9;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --success: #4ade80;
+  --alert: #f87171;
+  --warn: #fbbf24;
+  --radius: 12px;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: linear-gradient(160deg, #0f172a 0%, #1a2744 50%, #0f172a 100%);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.app {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--surface-2);
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 700;
+  background: linear-gradient(90deg, var(--accent), #a78bfa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.brand p {
+  margin: 0.15rem 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+}
+
+.status-pill.live {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.status-pill.stopped {
+  color: var(--muted);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-pill.live .status-dot {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 1.25rem;
+}
+
+@media (max-width: 800px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius);
+  padding: 1rem;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.25);
+}
+
+.live-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.live-video,
+.live-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.live-overlay {
+  pointer-events: none;
+}
+
+.live-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+button {
+  padding: 0.55rem 1.1rem;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: linear-gradient(135deg, var(--accent), #0ea5e9);
+  color: #0f172a;
+  transition: opacity 0.15s;
+}
+
+button:hover {
+  opacity: 0.9;
+}
+
+button.secondary {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.agent-panel h2 {
+  margin: 0 0 1rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.agent-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--surface-2);
+  font-size: 0.9rem;
+}
+
+.agent-row:last-child {
+  border-bottom: none;
+}
+
+.agent-label {
+  color: var(--muted);
+}
+
+.agent-value {
+  font-weight: 600;
+  text-align: right;
+}
+
+.agent-value.fall {
+  color: var(--alert);
+}
+
+.agent-value.normal {
+  color: var(--success);
+}
+
+.agent-value.monitoring {
+  color: var(--warn);
+}
+
+.alert-banner {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.9rem;
+  text-align: center;
+  background: rgba(248, 113, 113, 0.15);
+  border: 1px solid var(--alert);
+  color: var(--alert);
+  animation: pulse-border 2s ease-in-out infinite;
+}
+
+@keyframes pulse-border {
+  0%,
+  100% {
+    border-color: var(--alert);
+  }
+  50% {
+    border-color: transparent;
+  }
+}
+
+.error {
+  margin-top: 0.75rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: 8px;
+  background: rgba(248, 113, 113, 0.12);
+  color: var(--alert);
+  font-size: 0.85rem;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-top: 1rem;
+}
