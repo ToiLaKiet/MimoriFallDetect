@@ -2,7 +2,7 @@
 
 checkpoint: ../../runs5/best.pt
 
-rtdetr_model: yolo26x.pt
+rtdetr_model: ../../MVP/backend/yolo26x.pt
 rtdetr_conf: 0.3
 rtdetr_iou: 0.7
 

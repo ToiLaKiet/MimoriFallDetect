@@ -71,6 +71,5 @@ yapf==0.43.0
 zipp==4.1.0
 flask==3.0.3
 flask-cors==4.0.1
-ultralytics==8.2.0
+ultralytics>=8.4.3
 transformers>=4.28.0,<4.46.0
-ultralytics

@@ -3,7 +3,7 @@ flask-cors>=4.0
 pyyaml>=6.0
 numpy
 Pillow
-ultralytics
+ultralytics>=8.4.3
 
 # OpenMMLab stack is installed by setup_env.sh (macOS needs mmcv-lite, not mmcv full).
 # Do not add "mmcv>=2.0" here — it tries to compile from source and fails on Mac.
