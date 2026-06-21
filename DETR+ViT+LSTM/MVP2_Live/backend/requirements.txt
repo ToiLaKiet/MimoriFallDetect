@@ -73,3 +73,4 @@ flask==3.0.3
 flask-cors==4.0.1
 ultralytics==8.2.0
 transformers>=4.28.0,<4.46.0
+ultralytics

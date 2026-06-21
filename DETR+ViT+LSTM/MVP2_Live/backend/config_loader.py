@@ -61,15 +61,15 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         raw: dict[str, Any] = yaml.safe_load(handle) or {}
 
     base_dir = config_path.parent
-    rtdetr_raw = raw.get("rtdetr_model", "rtdetr-x.pt")
+    rtdetr_raw = raw.get("rtdetr_model", raw.get("yolo_model", "yolo26x.pt"))
     rtdetr_path = _resolve_path(rtdetr_raw, base_dir)
     rtdetr_model = str(rtdetr_path) if rtdetr_path.is_file() else str(rtdetr_raw)
 
     return AppConfig(
         checkpoint=_resolve_path(raw.get("checkpoint", "../../runs5/best.pt"), base_dir),
         rtdetr_model=rtdetr_model,
-        rtdetr_conf=float(raw.get("rtdetr_conf", 0.25)),
-        rtdetr_iou=float(raw.get("rtdetr_iou", 0.7)),
+        rtdetr_conf=float(raw.get("rtdetr_conf", raw.get("yolo_conf", 0.25))),
+        rtdetr_iou=float(raw.get("rtdetr_iou", raw.get("yolo_iou", 0.7))),
         mmpose_config=_resolve_path(raw["mmpose_config"], base_dir),
         mmpose_checkpoint=_resolve_path(raw["mmpose_checkpoint"], base_dir),
         embedding_source=str(raw.get("embedding_source", "pre_head_gap")),
