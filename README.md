@@ -8,6 +8,14 @@ Camera / Video  →  RT-DETR-X (phát hiện người)  →  ViTPose (trích emb
 
 Dữ liệu huấn luyện chủ yếu lấy từ bộ **HAR-UP** (Human Activity Recognition — University of Porto), được thu thập qua các script trong thư mục `crawler/`.
 
+## Demo video
+
+GitHub không hỗ trợ nhúng iframe YouTube trực tiếp trong README. Cách hiển thị phổ biến nhất là dùng **thumbnail có link** — bấm vào ảnh sẽ mở video trên YouTube:
+
+[![Demo MimamoriFall](https://img.youtube.com/vi/OCikfFIfeos/maxresdefault.jpg)](https://www.youtube.com/watch?v=OCikfFIfeos)
+
+Xem trực tiếp: [https://www.youtube.com/watch?v=OCikfFIfeos](https://www.youtube.com/watch?v=OCikfFIfeos)
+
 ---
 
 ## Cấu trúc thư mục
