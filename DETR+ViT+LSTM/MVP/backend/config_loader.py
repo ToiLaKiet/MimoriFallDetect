@@ -59,7 +59,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         raw: dict[str, Any] = yaml.safe_load(handle) or {}
 
     base_dir = config_path.parent
-    rtdetr_raw = raw.get("rtdetr_model", raw.get("yolo_model", "yolo26x.pt"))
+    rtdetr_raw = raw.get("rtdetr_model", raw.get("yolo_model", "rtdetr-x.pt"))
     rtdetr_path = _resolve_path(rtdetr_raw, base_dir)
     rtdetr_model = str(rtdetr_path) if rtdetr_path.is_file() else str(rtdetr_raw)
 

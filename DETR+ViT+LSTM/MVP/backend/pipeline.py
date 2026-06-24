@@ -13,16 +13,16 @@ from PIL import Image
 import paths  # noqa: F401  — configure sys.path before local imports
 from paths import BBOX_DIR
 
-_yolo_spec = importlib.util.spec_from_file_location(
-    "yolo_inference",
-    BBOX_DIR / "yolo_inference.py",
+_rtdetr_spec = importlib.util.spec_from_file_location(
+    "rtdetr_x_inference",
+    BBOX_DIR / "rtdetr-x_inference.py",
 )
-if _yolo_spec is None or _yolo_spec.loader is None:
-    raise ImportError(f"Cannot load YOLO inference from {BBOX_DIR}")
-_yolo_mod = importlib.util.module_from_spec(_yolo_spec)
-_yolo_spec.loader.exec_module(_yolo_mod)
-detect_largest_person_bbox = _yolo_mod.detect_largest_person_bbox
-load_yolo_model = _yolo_mod.load_yolo_model
+if _rtdetr_spec is None or _rtdetr_spec.loader is None:
+    raise ImportError(f"Cannot load RT-DETR inference from {BBOX_DIR}")
+_rtdetr_mod = importlib.util.module_from_spec(_rtdetr_spec)
+_rtdetr_spec.loader.exec_module(_rtdetr_mod)
+detect_largest_person_bbox = _rtdetr_mod.detect_largest_person_bbox
+load_rtdetr_model = _rtdetr_mod.load_rtdetr_model
 
 from config_loader import AppConfig, load_config
 from mmpose_vitpose_estimator import MMPoseEmbeddingSource, MMPoseVitPoseEstimator
@@ -266,7 +266,7 @@ class FallDetectionPipeline:
                 f"MMPose checkpoint not found: {self.config.mmpose_checkpoint}"
             )
 
-        self._detector_model = load_yolo_model(self.config.rtdetr_model)
+        self._detector_model = load_rtdetr_model(self.config.rtdetr_model)
         self._vitpose = MMPoseVitPoseEstimator(
             config_path=self.config.mmpose_config,
             checkpoint_path=self.config.mmpose_checkpoint,
